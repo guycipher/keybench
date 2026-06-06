@@ -13,6 +13,7 @@ luac.out
 *.ko
 *.obj
 *.elf
+*.cnf
 *.gch
 *.pch
 *.lib

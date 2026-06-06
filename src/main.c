@@ -426,18 +426,20 @@ typedef struct
     const config *cfg;
     kv_store *store;
     int tid, nthreads;
+    kvlua_ctx kc;
     int err;
 } load_worker;
 
 /* Seed a shard of the dataset in parallel. The workload's load() reads
    ctx.thread and ctx.threads to write only its slice, and ctx.batch to group
-   writes, so N threads fill the store together instead of one doing it all. */
+   writes, so N threads fill the store together instead of one doing it all. The
+   kc lives in the struct so a progress thread can read keys seeded as it runs. */
 static void *load_worker_main(void *arg)
 {
     load_worker *w = arg;
-    kvlua_ctx kc = {.store = w->store};
-    stats_reset(&kc.stats);
-    lua_State *L = open_workload(w->path, &kc, w->cfg->seed + (unsigned)w->tid);
+    w->kc.store = w->store;
+    stats_reset(&w->kc.stats);
+    lua_State *L = open_workload(w->path, &w->kc, w->cfg->seed + (unsigned)w->tid);
     if (!L)
     {
         w->err = 1;
@@ -457,6 +459,43 @@ static void *load_worker_main(void *arg)
     else
         lua_pop(L, 1);
     lua_close(L);
+    return NULL;
+}
+
+typedef struct
+{
+    load_worker *lw;
+    int nthreads;
+    uint64_t t0;
+    volatile int stop;
+    const char *workload, *engine;
+} seed_progress;
+
+/* Stream the seed phase to stderr like the run phase, so a long load shows keys
+   written and the rate instead of looking hung. One line per tick, scrolling. */
+static void *seed_progress_main(void *arg)
+{
+    seed_progress *p = arg;
+    uint64_t prev_t = p->t0, prev_keys = 0;
+    while (!p->stop)
+    {
+        uint64_t until = now_ns() + PROGRESS_TICK_NS;
+        while (!p->stop && now_ns() < until)
+        {
+            struct timespec ts = {0, PROGRESS_STEP_NS};
+            nanosleep(&ts, NULL);
+        }
+        if (p->stop) break;
+        uint64_t now = now_ns(), keys = 0;
+        for (int t = 0; t < p->nthreads; t++) keys += KV_RELAXED_GET(p->lw[t].kc.stats.prim_ops);
+        double dt = (now - prev_t) / 1e9;
+        double rate = dt > 0 ? (double)(keys - prev_keys) / dt : 0.0;
+        prev_keys = keys;
+        prev_t = now;
+        fprintf(stderr, "  seeding %s %s  %5.1fs  %12llu keys  %10.0f keys/s\n", p->workload,
+                p->engine, (now - p->t0) / 1e9, (unsigned long long)keys, rate);
+        fflush(stderr);
+    }
     return NULL;
 }
 
@@ -508,10 +547,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
         int show = isatty(STDERR_FILENO);
         uint64_t ls = now_ns();
         if (show)
-        {
-            fprintf(stderr, "  seeding %s on %s with %d threads ...", name, R->engine, nthreads);
-            fflush(stderr);
-        }
+            fprintf(stderr, "  seeding %s on %s with %d threads\n", name, R->engine, nthreads);
         load_worker *lw = calloc((size_t)nthreads, sizeof *lw);
         pthread_t *ltids = calloc((size_t)nthreads, sizeof *ltids);
         if (!lw || !ltids)
@@ -520,19 +556,42 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
             abort();
         }
         for (int t = 0; t < nthreads; t++)
-            lw[t] = (load_worker){
-                .path = path, .cfg = cfg, .store = store, .tid = t, .nthreads = nthreads, .err = 0};
+        {
+            lw[t].path = path;
+            lw[t].cfg = cfg;
+            lw[t].store = store;
+            lw[t].tid = t;
+            lw[t].nthreads = nthreads;
+        }
         for (int t = 0; t < nthreads; t++)
             pthread_create(&ltids[t], NULL, load_worker_main, &lw[t]);
+
+        seed_progress spg;
+        pthread_t spgtid;
+        if (show)
+        {
+            spg = (seed_progress){.lw = lw,
+                                  .nthreads = nthreads,
+                                  .t0 = ls,
+                                  .stop = 0,
+                                  .workload = name,
+                                  .engine = R->engine};
+            pthread_create(&spgtid, NULL, seed_progress_main, &spg);
+        }
         int lerr = 0;
         for (int t = 0; t < nthreads; t++)
         {
             pthread_join(ltids[t], NULL);
             if (lw[t].err) lerr = 1;
         }
+        if (show)
+        {
+            spg.stop = 1;
+            pthread_join(spgtid, NULL);
+            fprintf(stderr, "  seeded %s in %.1fs\n", name, (now_ns() - ls) / 1e9);
+        }
         free(lw);
         free(ltids);
-        if (show) fprintf(stderr, " done (%.1fs)\n", (now_ns() - ls) / 1e9);
         if (lerr)
         {
             store_close(store);
