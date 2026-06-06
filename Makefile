@@ -38,20 +38,26 @@ ifeq ($(TIDESDB),1)
 endif
 include $(foreach b,$(BACKENDS),backends/$(b)/backend.mk)
 
-# RocksDB and TidesDB are both built against jemalloc. Link it into the
-# executable as the earliest NEEDED library so the whole malloc family,
-# malloc_usable_size included, resolves to one allocator. A distro librocksdb
-# built against jemalloc otherwise calls glibc malloc_usable_size on
-# jemalloc owned memory and segfaults when a DB is reopened across sweep
-# points. The --no-as-needed flag keeps the dependency even though keybench's
-# own malloc references are also satisfiable by libc. Override JEMALLOC_LIBS
-# for a custom path, or set JEMALLOC=0 to opt out.
-JEMALLOC ?= 1
-ifneq ($(filter rocksdb tidesdb,$(BACKENDS)),)
-  ifeq ($(JEMALLOC),1)
-    JEMALLOC_LIBS ?= -Wl,--no-as-needed,-l:libjemalloc.so.2,--as-needed
-    LDLIBS := $(JEMALLOC_LIBS) $(LDLIBS)
-  endif
+# Memory allocator (optional, off by default, uses the system allocator).
+# Linking an allocator into the executable as the earliest NEEDED library makes
+# the whole malloc family, malloc_usable_size included, resolve to it. This
+# matters when a distro rocksdb or tidesdb was itself built against jemalloc,
+# since glibc malloc_usable_size called on jemalloc owned memory segfaults when a
+# database is reopened across sweep points. The --no-as-needed flag keeps the
+# dependency even though keybench's own malloc calls are also satisfiable by libc.
+#
+# Set ALLOC to jemalloc or tcmalloc to link that allocator first. For any other
+# allocator set ALLOC_LIBS directly, for example ALLOC_LIBS="-L/opt/lib
+# -l:libmimalloc.so". Override ALLOC_LIBS to point at a custom install path too.
+ALLOC ?=
+ifeq ($(ALLOC),jemalloc)
+  ALLOC_LIBS ?= -Wl,--no-as-needed,-l:libjemalloc.so.2,--as-needed
+endif
+ifeq ($(ALLOC),tcmalloc)
+  ALLOC_LIBS ?= -Wl,--no-as-needed,-l:libtcmalloc.so.4,--as-needed
+endif
+ifneq ($(strip $(ALLOC_LIBS)),)
+  LDLIBS := $(ALLOC_LIBS) $(LDLIBS)
 endif
 
 .PHONY: all

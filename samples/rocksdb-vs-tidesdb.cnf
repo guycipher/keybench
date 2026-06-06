@@ -61,6 +61,7 @@ level0_file_num_compaction_trigger = 10
 # target_file_size_multiplier = 1          # sstable size growth per level
 # max_background_jobs = 2                   # flush and compaction worker budget
 # max_open_files = -1                       # unlimited open files
+# info_log_level = INFO_LEVEL              # LOG verbosity, written to the db dir not the console, raise to ERROR_LEVEL to quieten
 
 # Reference, RocksDB block table and block cache defaults. All of these go
 # inside one block_based_table_factory value separated by semicolons, for
@@ -87,8 +88,8 @@ level0_file_num_compaction_trigger = 10
 # prepopulate_blob_cache = kDisable        # kFlushOnly warms the cache on flush
 
 # keybench applies these to the tidesdb config and to its one column family. The
-# lists below are the complete set keybench understands. keybench forces the log
-# level to none.
+# lists below are the complete set keybench understands. keybench defaults the
+# log level to none, set log_level below to turn tidesdb logging on.
 [tidesdb]
 # Active overrides for this parity run. Compression off, bloom on, a 64M block
 # cache, and a deeper compaction pool so the comparison with rocksdb is fair.
@@ -111,6 +112,7 @@ max_open_sstables = 4096                    # ceiling on open sstable handles
 # max_concurrent_flushes = 0                # 0 matches num_flush_threads
 # unified_memtable = 0                      # 1 shares one memtable across families
 # unified_memtable_write_buffer_size = 0    # 0 sizes it automatically
+# log_level = none                          # none debug info warn error fatal, default none
 
 # Reference, tidesdb column family defaults.
 # write_buffer_size = 64M                   # memtable rotation threshold

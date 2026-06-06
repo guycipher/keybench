@@ -5,8 +5,8 @@ A scriptable, extensible performance tool for sorted key value stores.
 
 You write the workload in Lua. keybench drives it across one or more storage
 engines, times every operation, and reports throughput and latency. The same
-script runs unchanged against an in memory skiplist, against RocksDB, and
-against TidesDB, so a comparison measures the engines and not the harness.
+script runs unchanged against every engine, so a comparison measures the
+engines and not the harness.
 
 
 What it measures
@@ -89,9 +89,17 @@ To compile in the persistent engines, name them.
   make TIDESDB=1                 add the TidesDB engine
   make BACKENDS="skiplist rocksdb tidesdb"
 
-RocksDB needs librocksdb and its headers. TidesDB needs libtidesdb. Both are
-linked against jemalloc as the first allocator so the whole malloc family
-resolves to one heap across repeated opens. Set JEMALLOC=0 to opt out.
+No special allocator is linked by default, keybench uses the system one. If a
+distro rocksdb or tidesdb was itself built against jemalloc, link the same
+allocator first with ALLOC=jemalloc so the whole malloc family agrees, which
+avoids a crash when a database is reopened across sweep points. ALLOC=tcmalloc
+works too, and ALLOC_LIBS="..." links any other allocator or a custom path. The
+engine library and header locations are also overridable, so a custom install
+works.
+
+  make ROCKSDB=1 ROCKSDB_CFLAGS=-I/opt/rocksdb/include ROCKSDB_LIBS="-L/opt/rocksdb/lib -lrocksdb"
+  make TIDESDB=1 TIDESDB_CFLAGS=-I/opt/tidesdb/include TIDESDB_LIBS="-L/opt/tidesdb/lib -ltidesdb"
+  make ROCKSDB=1 TIDESDB=1 ALLOC=jemalloc
 
 To build against a system Lua instead of the vendored copy.
 
@@ -124,19 +132,46 @@ prints a console report. The shape of that report.
     keybench       0.1.0
     ...
 
-  === mixed ===  engine=skiplist threads=1 batch=1  (median of 1 run)
+  === mixed ===
+  engine=skiplist  threads=1  batch=1  (median of 1 run)
   op             count        p50        p99      p99.9        max
-  put             5938     442 ns    1.30 us   10.94 us   14.16 us
-  get             9989     450 ns    1.26 us   11.58 us   13.27 us
-  del             1995     446 ns    1.32 us    6.75 us   10.17 us
-  range           2078    2.13 us    5.15 us   15.55 us   16.65 us
-  get hit rate: 99.0%
-  throughput: 302182 /sec (1 op per unit)
+  put            60404     462 ns    1.43 us   11.71 us   15.48 us
+  get            99617     474 ns    1.46 us   11.84 us   69.14 us
+  del            19955     470 ns    1.48 us    9.41 us   13.41 us
+  range          20024    2.32 us    8.26 us   15.55 us   26.98 us
+  get hit rate: 92.2%
+  throughput: 315896 /sec (1 op per unit)
 
 The system probe records the machine. The build probe records the compiler and
 allocator. The per op table gives the latency distribution. The hit rate is the
 fraction of gets that found a key. The throughput line gives wu/s and, when it
 differs, ops/s.
+
+
+Live progress
+=============
+
+While a point runs, keybench streams a status line to stderr once a second, so a
+long point looks alive rather than hung. It first prints a seeding line for the
+untimed load phase, then one line per second, each its own line so the output
+scrolls as a log rather than rewriting one spot. A time bounded point shows the
+elapsed and budget seconds and the current rate.
+
+  seeding cart on rocksdb 11.1.1 ... done (1.8s)
+  cart rocksdb 11.1.1 t8 b1    1.0/5s     776154 wu/s
+  cart rocksdb 11.1.1 t8 b1    2.0/5s     626071 wu/s
+  cart rocksdb 11.1.1 t8 b1    3.0/5s     578264 wu/s
+
+A count bounded point shows the elapsed seconds, the rate, and the percent of
+the op budget done.
+
+  mixed rocksdb 11.1.1 t1 b1    2.0s     161301 wu/s   43% (341639/800000)
+  mixed rocksdb 11.1.1 t1 b1    3.0s     147362 wu/s   61% (489498/800000)
+  mixed rocksdb 11.1.1 t1 b1    4.0s     138006 wu/s   78% (627934/800000)
+
+The status goes to stderr and only when stderr is a terminal, so it never lands
+in a piped or redirected log and never mixes into the stdout report or the tsv
+streams.
 
 
 Choosing the work
@@ -164,9 +199,12 @@ ran.
   --batch L      one batch size, or a comma list to sweep. e.g. 1,8,64
   --repeat N     run each point N times and report the median.
 
-The grid is the cross product of engines, thread counts, and batch sizes. Each
-cell is run --repeat times and reduced to a median, which damps the noise of a
-single run. An example that compares two engines as they scale.
+The grid is the cross product of engines, thread counts, and batch sizes. Only a
+workload that opts into batching, by returning batched true, varies with the
+batch knob, so the others run once at batch one rather than repeating an
+identical measurement across the batch list. Each cell is run --repeat times and
+reduced to a median, which damps the noise of a single run. An example that
+compares two engines as they scale.
 
   ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
              workloads/mixed.lua
@@ -302,7 +340,10 @@ A workload file returns a table.
   return { name = "mine", load = load, run = run }
 
 name labels the report. load is optional and runs once before timing to seed
-the store. run is the measured unit and runs many times. Both take ctx.
+the store. run is the measured unit and runs many times. Both take ctx. A
+workload that reads ctx.batch through kv.mget or kv.mput also returns batched =
+true, which tells keybench to sweep it over the batch sizes. Without that the
+batch sweep is skipped for the file and it runs once at batch one.
 
   local function load(ctx)
     for i = 0, ctx.items - 1 do
@@ -383,47 +424,14 @@ a fast disk with room for the run.
 Hits and misses
 ==============
 
-A hit and a miss in keybench are a logical fact, not a cache statistic. A get is
-a hit when the engine returns a live value and a miss when it returns nothing.
-The kv bridge times the call either way, files the sample in the get histogram,
-and then counts one hit or one miss from the return code. The batched verb
-kv.mget counts a hit or a miss for each key it carries. The console report shows
-the blend as a hit rate, the fraction of gets that found a key, and it appears
-only when the workload issued at least one get.
-
-The hit rate is the context you need to read the get latencies, because for an
-LSM engine a hit and a miss do not cost the same. The in memory skiplist is
-symmetric, a lookup either lands on the node or lands in the gap for about the
-same work. RocksDB and TidesDB are not. A read walks the memtable and then each
-level of sorted files from newest to oldest. A hit can stop the moment it finds
-the key in a high level. A miss is the worst case, because absence can only be
-proven by ruling out every file whose key range could hold the key.
-
-This is where the bloom filter earns its place and why these engines are called
-optimistic on the read path. Every sorted file carries a bloom filter, and the
-engine asks it whether a key could be present before it reads any block. A bloom
-filter has no false negatives, so a no skips that file with a few bit tests. For
-a key that never existed almost every file answers no, and a deep disk hunt
-collapses into memory. The cost is the false positive rate, set by bloom_fpr on
-TidesDB and by the filter bits on RocksDB, which is the small fraction of misses
-that still pay for one wasted file read.
-
-One case escapes the optimism, and the bundled workloads hit it. A key that was
-written and then deleted leaves a tombstone. Its old versions and the tombstone
-still sit in files whose bloom filters answer yes, so the engine reads, finds
-the tombstone, and reports a miss. That miss is not saved by the filter and is
-among the more expensive ones until compaction drops the tombstone. The mixed
-and cart workloads delete as they run, so their misses are mostly tombstone
-misses rather than never existed keys, which is the realistic and slightly
-adversarial case.
-
-The timeline reporter exposes the engine internals that explain these numbers.
-Alongside wu_per_s and ops_per_s it records, per sample, the engine's own
-counters, for TidesDB the live key count, level count, read amplification,
-tombstone count and ratio, flush and compaction counts and bytes, and the block
-cache hit rate, and for RocksDB the equivalent memtable, compaction, and block
-cache properties. Read the get hit rate and the get tail together with the
-tombstone ratio and read amplification and the picture is consistent.
+A get is a hit when the engine returns a value and a miss when it returns
+nothing. The kv bridge times the call either way, files the sample in the get
+histogram, and counts one hit or one miss from the return code, and kv.mget
+counts one per key it carries. The console reports the blend as a hit rate, the
+fraction of gets that found a key, shown only when the workload issued at least
+one get. The rate is a logical fact about the keys the workload asked for, not a
+cache statistic, and it is the context for reading the get latencies, since an
+engine may serve a hit and a miss at very different costs.
 
 
 Adding an engine

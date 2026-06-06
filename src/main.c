@@ -357,11 +357,11 @@ typedef struct
 
 #define PROGRESS_TICK_NS 1000000000ull
 #define PROGRESS_STEP_NS 20000000
-#define PROGRESS_CLEAR   "\r\033[K" /* carriage return then ANSI erase to end of line */
 
-/* Stream a one-line status to stderr while a point runs, so a long single-thread
-   point looks alive rather than hung. Updates in place with a carriage return.
-   stderr keeps it off the stdout report and tsv streams. */
+/* Stream a status line to stderr every tick while a point runs, so a long point
+   looks alive rather than hung. Each tick is its own line, so the output scrolls
+   as a running log rather than rewriting one spot. stderr keeps it off the stdout
+   report and tsv streams. */
 static void *progress_main(void *arg)
 {
     progress *p = arg;
@@ -385,11 +385,11 @@ static void *progress_main(void *arg)
         prev_units = units;
         prev_t = now;
         if (p->secs > 0)
-            fprintf(stderr, PROGRESS_CLEAR "  %s %s t%d b%d  %5.1f/%.0fs  %9.0f wu/s", p->workload,
-                    p->engine, p->threads, p->batch, elapsed, p->secs, rate);
+            fprintf(stderr, "  %s %s t%d b%d  %5.1f/%.0fs  %9.0f wu/s\n", p->workload, p->engine,
+                    p->threads, p->batch, elapsed, p->secs, rate);
         else
-            fprintf(stderr, PROGRESS_CLEAR "  %s %s t%d b%d  %5.1fs  %9.0f wu/s  %3.0f%% (%ld/%ld)",
-                    p->workload, p->engine, p->threads, p->batch, elapsed, rate,
+            fprintf(stderr, "  %s %s t%d b%d  %5.1fs  %9.0f wu/s  %3.0f%% (%ld/%ld)\n", p->workload,
+                    p->engine, p->threads, p->batch, elapsed, rate,
                     p->target > 0 ? 100.0 * (double)units / (double)p->target : 0.0, units,
                     p->target);
         fflush(stderr);
@@ -534,7 +534,6 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
     {
         pr.stop = 1;
         pthread_join(prtid, NULL);
-        fputs(PROGRESS_CLEAR, stderr); /* erase the live line before the report */
     }
 
     int any_err = 0;
