@@ -390,9 +390,12 @@ static void *progress_main(void *arg)
     progress *p = arg;
     long prev_units = 0;
     uint64_t prev_t = p->t0;
+    long tick = 0;
     while (!p->stop)
     {
-        uint64_t until = now_ns() + PROGRESS_TICK_NS;
+        /* Wait until an absolute tick boundary so the ticks do not drift later
+           as their small overshoots accumulate. */
+        uint64_t until = p->t0 + (uint64_t)(++tick) * PROGRESS_TICK_NS;
         while (!p->stop && now_ns() < until)
         {
             struct timespec ts = {0, PROGRESS_STEP_NS};
@@ -477,9 +480,12 @@ static void *seed_progress_main(void *arg)
 {
     seed_progress *p = arg;
     uint64_t prev_t = p->t0, prev_keys = 0;
+    long tick = 0;
     while (!p->stop)
     {
-        uint64_t until = now_ns() + PROGRESS_TICK_NS;
+        /* Absolute tick boundary so the labels do not drift later over a long
+           seed as the per tick overshoots add up. */
+        uint64_t until = p->t0 + (uint64_t)(++tick) * PROGRESS_TICK_NS;
         while (!p->stop && now_ns() < until)
         {
             struct timespec ts = {0, PROGRESS_STEP_NS};
