@@ -273,21 +273,25 @@ Plotting
 ========
 
 scripts/plot.py renders the tsv artifacts of one or more result directories
-into PDF figures, throughput bars, scalability curves, batch amortization,
-latency percentiles, and the live timelines. The system timeline figure carries
-every metric the system probe records, and the engine internals are drawn one
-figure per engine, since RocksDB and TidesDB report different metric names and
-so never share a panel. Every metric an engine emits gets a panel, including the
-ones that stay flat or zero for the whole run, since a constant is itself a fact
+into figures, throughput bars, scalability curves, batch amortization, latency
+percentiles, and the live timelines. The system timeline figure carries every
+metric the system probe records, and the engine internals are drawn one figure
+per engine, since RocksDB and TidesDB report different metric names and so never
+share a panel. Every metric an engine emits gets a panel, including the ones
+that stay flat or zero for the whole run, since a constant is itself a fact
 worth seeing. Engine colors come from the BACKENDPALETTE file.
+
+Figures are written as PNG by default, which is what you want for a slide or a
+post. Pass --format pdf or --format svg for a vector copy, say for a paper.
+
+  python3 scripts/plot.py results/<timestamp> --out figures
+  python3 scripts/plot.py results/<timestamp> --out figures --format pdf
 
 The timeline figures are only as detailed as the samples behind them, so a run
 needs a sample interval and enough time per point to fill them. A short fixed
 ops run finishes each point in well under a second and leaves the timelines
 nearly empty. Give the run a timeline interval and either a seconds budget or a
 large ops count so the sampler fires many times.
-
-  python3 scripts/plot.py results/<timestamp> --out figures
 
 
 Writing a workload

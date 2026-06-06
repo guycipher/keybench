@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 TAB = "\t"
 NS_PER_US = 1000.0
 FIG_DPI = 150
+FIG_FORMATS = ("png", "pdf", "svg")
+DEFAULT_FORMAT = "png"
 MAX_DIRS = 64
 MAX_PANELS = 128
 
@@ -245,11 +247,11 @@ def make_grid(npanels: int, title: str) -> tuple[object, list[object]]:
     return fig, flat[:npanels]
 
 
-def save(fig: object, outdir: Path, name: str) -> Path:
+def save(fig: object, outdir: Path, stem: str, ext: str) -> Path:
     assert isinstance(outdir, Path), "outdir must be a Path"
-    assert name.endswith(".pdf"), "figure name must be a pdf"
+    assert ext in FIG_FORMATS, "unsupported figure format"
     outdir.mkdir(parents=True, exist_ok=True)
-    path = outdir / name
+    path = outdir / f"{stem}.{ext}"
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(path, dpi=FIG_DPI)
     plt.close(fig)
@@ -257,7 +259,7 @@ def save(fig: object, outdir: Path, name: str) -> Path:
 
 
 def plot_throughput_compare(points: list[Point], palette: dict[str, str],
-                            outdir: Path) -> Optional[Path]:
+                            outdir: Path, ext: str) -> Optional[Path]:
     assert isinstance(points, list), "points must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     top = peak_threads(points)
@@ -278,10 +280,11 @@ def plot_throughput_compare(points: list[Point], palette: dict[str, str],
     ax.set_title(f"Throughput by workload at {top} threads")
     ax.grid(True, axis="y", alpha=GRID_ALPHA)
     ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, "throughput_compare.pdf")
+    return save(fig, outdir, "throughput_compare", ext)
 
 
-def plot_scalability(points: list[Point], palette: dict[str, str], outdir: Path) -> Optional[Path]:
+def plot_scalability(points: list[Point], palette: dict[str, str], outdir: Path,
+                     ext: str) -> Optional[Path]:
     assert isinstance(points, list), "points must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     usable = [p for p in points if p.batch == baseline_batch(points)]
@@ -300,7 +303,7 @@ def plot_scalability(points: list[Point], palette: dict[str, str], outdir: Path)
         ax.set_ylabel("wu per s")
         ax.grid(True, alpha=GRID_ALPHA)
         ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, "scalability.pdf")
+    return save(fig, outdir, "scalability", ext)
 
 
 def draw_op_compare(ax: object, points: list[Point], workload: str, ops: list[str],
@@ -323,7 +326,7 @@ def draw_op_compare(ax: object, points: list[Point], workload: str, ops: list[st
 
 
 def plot_latency_compare(points: list[Point], pctl: str, palette: dict[str, str],
-                         outdir: Path) -> Optional[Path]:
+                         outdir: Path, ext: str) -> Optional[Path]:
     assert isinstance(points, list), "points must be a list"
     assert isinstance(pctl, str), "pctl must be a string"
     top = peak_threads(points)
@@ -337,10 +340,11 @@ def plot_latency_compare(points: list[Point], pctl: str, palette: dict[str, str]
         ops = sorted({op for p in chosen if p.workload == workload for op in p.ops})
         draw_op_compare(ax, chosen, workload, ops, engines, pctl, palette)
         ax.set_title(workload)
-    return save(fig, outdir, f"latency_{pctl.replace('.', '')}_compare.pdf")
+    return save(fig, outdir, f"latency_{pctl.replace('.', '')}_compare", ext)
 
 
-def plot_batch(points: list[Point], palette: dict[str, str], outdir: Path) -> Optional[Path]:
+def plot_batch(points: list[Point], palette: dict[str, str], outdir: Path,
+               ext: str) -> Optional[Path]:
     assert isinstance(points, list), "points must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     swept = swept_workloads(points)
@@ -364,11 +368,11 @@ def plot_batch(points: list[Point], palette: dict[str, str], outdir: Path) -> Op
         ax.set_ylabel("ops per s")
         ax.grid(True, alpha=GRID_ALPHA)
         ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, "batch_amortization.pdf")
+    return save(fig, outdir, "batch_amortization", ext)
 
 
 def plot_timeline(rows: list[dict[str, str]], palette: dict[str, str],
-                  outdir: Path) -> Optional[Path]:
+                  outdir: Path, ext: str) -> Optional[Path]:
     assert isinstance(rows, list), "rows must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     if not rows or THROUGHPUT_METRIC not in set(distinct([r[COL_METRIC] for r in rows])):
@@ -388,11 +392,11 @@ def plot_timeline(rows: list[dict[str, str]], palette: dict[str, str],
         ax.set_ylabel("wu per s")
         ax.grid(True, alpha=GRID_ALPHA)
         ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, "timeline_throughput.pdf")
+    return save(fig, outdir, "timeline_throughput", ext)
 
 
 def plot_timeline_system(rows: list[dict[str, str]], palette: dict[str, str],
-                         outdir: Path) -> Optional[Path]:
+                         outdir: Path, ext: str) -> Optional[Path]:
     assert isinstance(rows, list), "rows must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     if not rows:
@@ -416,11 +420,11 @@ def plot_timeline_system(rows: list[dict[str, str]], palette: dict[str, str],
         ax.set_xlabel("elapsed s")
         ax.grid(True, alpha=GRID_ALPHA)
         ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, "timeline_system.pdf")
+    return save(fig, outdir, "timeline_system", ext)
 
 
 def draw_engine_figure(rows: list[dict[str, str]], engine: str, workload: str,
-                       palette: dict[str, str], outdir: Path) -> Optional[Path]:
+                       palette: dict[str, str], outdir: Path, ext: str) -> Optional[Path]:
     """Render one figure of a single engine's internal metrics over time."""
     assert isinstance(engine, str), "engine must be a string"
     assert isinstance(workload, str), "workload must be a string"
@@ -444,11 +448,11 @@ def draw_engine_figure(rows: list[dict[str, str]], engine: str, workload: str,
         ax.set_xlabel("elapsed s")
         ax.grid(True, alpha=GRID_ALPHA)
         ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, f"engine_stats_{token}.pdf")
+    return save(fig, outdir, f"engine_stats_{token}", ext)
 
 
 def plot_engine_stats(rows: list[dict[str, str]], palette: dict[str, str],
-                      outdir: Path) -> list[Path]:
+                      outdir: Path, ext: str) -> list[Path]:
     """One engine internals figure per engine, since rocksdb and tidesdb report
     disjoint metric names and so never share a panel. Every engine that emitted
     samples gets its own complete figure."""
@@ -463,7 +467,7 @@ def plot_engine_stats(rows: list[dict[str, str]], palette: dict[str, str],
     for engine in engines:
         count += 1
         assert count <= len(engines) + 1, "engine loop exceeded its bound"
-        path = draw_engine_figure(rows, engine, workload, palette, outdir)
+        path = draw_engine_figure(rows, engine, workload, palette, outdir, ext)
         if path is not None:
             written.append(path)
     return written
@@ -487,9 +491,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="plot keybench results")
     parser.add_argument("dirs", nargs="+", help="result directories")
     parser.add_argument("--out", default="figures", help="output directory")
+    parser.add_argument("--format", default=DEFAULT_FORMAT, choices=FIG_FORMATS,
+                        help="figure file format (default png)")
     ns = parser.parse_args()
     dirs = [Path(d) for d in ns.dirs]
     outdir = Path(ns.out)
+    ext = ns.format
     point_rows, timeline_rows = gather(dirs)
     if not point_rows:
         print("no points.tsv rows found")
@@ -497,15 +504,15 @@ def main() -> int:
     points = build_points(point_rows)
     palette = load_palette(Path(__file__).resolve().parent.parent)
     results = [
-        plot_throughput_compare(points, palette, outdir),
-        plot_scalability(points, palette, outdir),
-        plot_batch(points, palette, outdir),
-        plot_timeline(timeline_rows, palette, outdir),
-        plot_timeline_system(timeline_rows, palette, outdir),
+        plot_throughput_compare(points, palette, outdir, ext),
+        plot_scalability(points, palette, outdir, ext),
+        plot_batch(points, palette, outdir, ext),
+        plot_timeline(timeline_rows, palette, outdir, ext),
+        plot_timeline_system(timeline_rows, palette, outdir, ext),
     ]
-    results.extend(plot_engine_stats(timeline_rows, palette, outdir))
+    results.extend(plot_engine_stats(timeline_rows, palette, outdir, ext))
     for pctl in COMPARE_PCTLS:
-        results.append(plot_latency_compare(points, pctl, palette, outdir))
+        results.append(plot_latency_compare(points, pctl, palette, outdir, ext))
     for result in results:
         if result is not None:
             print(f"wrote {result}")
