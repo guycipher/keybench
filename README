@@ -127,11 +127,20 @@ prints a console report. The shape of that report.
     threads: 1   batch: 1
   [probe: system]
     host           agpmastersystem
+    os             Linux 6.2.0-39-generic x86_64
     cpu            11th Gen Intel(R) Core(TM) i7-11700K @ 3.60GHz
-    ...
+    cpu_cores      16
+    ram            46.8 GiB
+    page_size      4096
+    data_fs(/tmp)  88.6 GiB free of 296.0 GiB
+    data_dev       /dev/sdb4 on / (ext4)
+    data_disk      solid state
+    data_disk_model WDC  WDS500G2B0A
   [probe: build]
     keybench       0.1.0
-    ...
+    compiler       12.3.0
+    std            C 201112 (optimized)
+    allocator      jemalloc (glibc 2.37)
 
   === mixed ===
   engine=skiplist  threads=1  batch=1  (median of 1 run)
