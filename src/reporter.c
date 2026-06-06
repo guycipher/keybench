@@ -35,7 +35,7 @@ static void console_probe(reporter *r, const report_probe *p)
 
 static void console_point(reporter *r, const report_point *p)
 {
-    fprintf(r->out, "\n=== %s ===  engine=%s threads=%d batch=%d  (median of %d run%s)\n",
+    fprintf(r->out, "\n=== %s ===\nengine=%s  threads=%d  batch=%d  (median of %d run%s)\n",
             p->workload, p->engine, p->threads, p->batch, p->repeat, p->repeat == 1 ? "" : "s");
     fprintf(r->out, "%-7s %12s %10s %10s %10s %10s\n", "op", "count", "p50", "p99", "p99.9", "max");
     char b50[32], b99[32], b999[32], bmax[32];

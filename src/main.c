@@ -357,6 +357,7 @@ typedef struct
 
 #define PROGRESS_TICK_NS 1000000000ull
 #define PROGRESS_STEP_NS 20000000
+#define PROGRESS_CLEAR   "\r\033[K" /* carriage return then ANSI erase to end of line */
 
 /* Stream a one-line status to stderr while a point runs, so a long single-thread
    point looks alive rather than hung. Updates in place with a carriage return.
@@ -384,10 +385,10 @@ static void *progress_main(void *arg)
         prev_units = units;
         prev_t = now;
         if (p->secs > 0)
-            fprintf(stderr, "\r  %s %s t%d b%d  %5.1f/%.0fs  %9.0f wu/s          ", p->workload,
+            fprintf(stderr, PROGRESS_CLEAR "  %s %s t%d b%d  %5.1f/%.0fs  %9.0f wu/s", p->workload,
                     p->engine, p->threads, p->batch, elapsed, p->secs, rate);
         else
-            fprintf(stderr, "\r  %s %s t%d b%d  %5.1fs  %9.0f wu/s  %3.0f%% (%ld/%ld)     ",
+            fprintf(stderr, PROGRESS_CLEAR "  %s %s t%d b%d  %5.1fs  %9.0f wu/s  %3.0f%% (%ld/%ld)",
                     p->workload, p->engine, p->threads, p->batch, elapsed, rate,
                     p->target > 0 ? 100.0 * (double)units / (double)p->target : 0.0, units,
                     p->target);
@@ -533,7 +534,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
     {
         pr.stop = 1;
         pthread_join(prtid, NULL);
-        fprintf(stderr, "\r%78s\r", ""); /* erase the live line before the report */
+        fputs(PROGRESS_CLEAR, stderr); /* erase the live line before the report */
     }
 
     int any_err = 0;
