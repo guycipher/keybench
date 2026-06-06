@@ -1,0 +1,455 @@
+keybench
+========
+
+A scriptable, extensible performance tool for sorted key value stores.
+
+You write the workload in Lua. keybench drives it across one or more storage
+engines, times every operation, and reports throughput and latency. The same
+script runs unchanged against an in memory skiplist, against RocksDB, and
+against TidesDB, so a comparison measures the engines and not the harness.
+
+
+What it measures
+================
+
+keybench reports two rates and a latency distribution.
+
+  wu/s    workload units per second. One unit is one call to your run()
+          function. This is the rate of whole operations as your script
+          defines them, a "view cart" or a "checkout", regardless of how many
+          key touches each one costs.
+
+  ops/s   primitive operations per second. One primitive op is a single put,
+          get, del, range, or scan call, or one key handled inside an mget,
+          mput, or mdel. A range or a scan counts once no matter how many rows
+          it returns. This is the rate of raw key touches.
+
+When every unit is one primitive op the two rates are equal and the report
+prints one throughput line. When a unit does several primitive ops, such as a
+batch of B keys or a cart checkout that scans then deletes, the report prints
+wu/sec and ops/sec on separate lines. For a batched verb ops/sec is exactly B
+times wu/sec, because each unit performs B key touches, so batching shows as
+ops/sec rising with B while wu/sec falls, the difference being the fixed per
+call cost spread over more keys.
+
+Latency is recorded per operation kind as a distribution, not an average. Each
+of put, get, del, range, mget, mput, and mdel has its own histogram, and a scan
+is timed into the range histogram. The report gives p50, p99, p99.9, and the
+max for each.
+
+
+How it works
+============
+
+Five parts, each replaceable.
+
+The engine owns concurrency. keybench spawns the worker threads, splits the op
+budget across them, and joins them. A worker runs your script in its own Lua
+state with its own random seed. The harness never holds a lock around an
+engine call, so a serialized engine reports as serialized and a parallel one
+reports as parallel. The Lua script stays single threaded and never reasons
+about locks.
+
+The workload is a Lua table. A file returns a table with a name, an optional
+load function, and a run function. load runs once, untimed, to seed the store.
+run is the measured unit and the harness calls it until the op budget or the
+time budget is spent. Both receive a ctx table carrying users, items, ops,
+seed, batch, and the current iter.
+
+The store is one verb set over every engine. Your script calls a global kv
+table. The same eight verbs reach whichever engine is selected. keybench times
+the call, files the sample in the right histogram, and counts the primitive
+ops.
+
+The backend is a self registering plugin. Each engine lives under backends/
+with its own build fragment and registers itself before main runs. Selecting
+one by name, or several for a comparison, is a command flag. Adding one is a
+new directory and a vtable, no edit to the core.
+
+The reporter is a sink. A run broadcasts its metadata, its probes, its
+aggregated points, and its live samples to every reporter you asked for. A
+console reporter prints a human report. A tsv reporter writes machine rows. A
+timeline reporter writes one row per live sample. You can run several at once.
+
+
+Building
+========
+
+keybench vendors its own Lua, so the default build needs only a C compiler and
+pthreads.
+
+  make
+
+That produces ./keybench with the in memory skiplist engine compiled in. The
+skiplist needs no external library and is the reference engine.
+
+To compile in the persistent engines, name them.
+
+  make ROCKSDB=1                 add the RocksDB engine
+  make TIDESDB=1                 add the TidesDB engine
+  make BACKENDS="skiplist rocksdb tidesdb"
+
+RocksDB needs librocksdb and its headers. TidesDB needs libtidesdb. Both are
+linked against jemalloc as the first allocator so the whole malloc family
+resolves to one heap across repeated opens. Set JEMALLOC=0 to opt out.
+
+To build against a system Lua instead of the vendored copy.
+
+  make LUA_SYS=1
+
+Other targets.
+
+  make run        build, then run the cart workload once
+  make all-wl     build, then run every workload in workloads/
+  make clean
+
+
+Running
+=======
+
+The smallest run names one workload file.
+
+  ./keybench workloads/mixed.lua
+
+By default this drives 200000 units on one thread against the skiplist and
+prints a console report. The shape of that report.
+
+  keybench 0.1.0: 1 workload(s), engine=skiplist seed=1 repeat=1
+    threads: 1   batch: 1
+  [probe: system]
+    host           agpmastersystem
+    cpu            11th Gen Intel(R) Core(TM) i7-11700K @ 3.60GHz
+    ...
+  [probe: build]
+    keybench       0.1.0
+    ...
+
+  === mixed ===  engine=skiplist threads=1 batch=1  (median of 1 run)
+  op             count        p50        p99      p99.9        max
+  put             5938     442 ns    1.30 us   10.94 us   14.16 us
+  get             9989     450 ns    1.26 us   11.58 us   13.27 us
+  del             1995     446 ns    1.32 us    6.75 us   10.17 us
+  range           2078    2.13 us    5.15 us   15.55 us   16.65 us
+  get hit rate: 99.0%
+  throughput: 302182 /sec (1 op per unit)
+
+The system probe records the machine. The build probe records the compiler and
+allocator. The per op table gives the latency distribution. The hit rate is the
+fraction of gets that found a key. The throughput line gives wu/s and, when it
+differs, ops/s.
+
+
+Choosing the work
+=================
+
+  --ops N        total units across all threads, then stop. Default 200000.
+  --secs S       run for S seconds instead of a fixed count.
+  --users N      size of the user population a workload may address.
+  --items N      size of the catalog a workload may address.
+  --seed N       base RNG seed. Thread t uses seed plus t.
+
+A run is either count bounded or time bounded. Giving --secs clears the op
+count and runs the clock.
+
+
+Sweeping and comparing
+======================
+
+A comma list in a knob turns one run into a grid. keybench runs every point in
+the grid and, when there is more than one, prints a summary table sorted as it
+ran.
+
+  --backend L    one engine, or a comma list to compare. e.g. skiplist,rocksdb
+  --threads L    one thread count, or a comma list to sweep. e.g. 1,2,4,8
+  --batch L      one batch size, or a comma list to sweep. e.g. 1,8,64
+  --repeat N     run each point N times and report the median.
+
+The grid is the cross product of engines, thread counts, and batch sizes. Each
+cell is run --repeat times and reduced to a median, which damps the noise of a
+single run. An example that compares two engines as they scale.
+
+  ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
+             workloads/mixed.lua
+
+Name several files to run them in sequence, each isolated in its own fresh
+store.
+
+  ./keybench workloads/cart.lua workloads/mixed.lua workloads/scan.lua
+
+
+Reporters and live timeline
+===========================
+
+  --report S     a comma list of sinks, each name or name:path.
+  --timeline S   sample every S seconds while a run is in flight.
+  --report-dir D create D/<timestamp>/ and bundle every artifact there.
+
+The sink names are console, tsv, and timeline. A bare name, or a name whose
+path is a single dash, writes to stdout. A name with a path writes to that
+file.
+
+  --report console,tsv:points.tsv,timeline:tl.tsv
+
+console prints the human report above. tsv writes one row per operation per
+grid point, ready for a spreadsheet or plot. timeline writes one row per live
+sample, one metric per row, so you can watch throughput, CPU, resident memory,
+disk bytes, and engine internals evolve over the run. The timeline sink only
+produces rows when --timeline names an interval.
+
+--report-dir is the convenient whole. It stamps a fresh directory, writes the
+console report, the points tsv, the timeline tsv, and a replay config into it,
+and tells you where.
+
+
+Probes
+======
+
+A probe records context the benchmark itself does not produce. The system
+probe reports the host, CPU, memory, and free disk, and samples CPU percent,
+resident memory, load, faults, and IO while the run proceeds. The build probe
+reports the keybench version, compiler, and allocator.
+
+  --probe L      a comma list of probes, or none to disable, or all by default.
+
+
+Config files and replay
+=======================
+
+A run can be written as a config file and replayed exactly. The format is plain
+INI. A [bench] section sets the run knobs. A section named for an engine tunes
+that engine and is handed to it at open time.
+
+  --config F        load run knobs from F, and engine tuning from its sections.
+  --save-config F   write the effective run to F as a replay config.
+
+The sample at samples/rocksdb-vs-tidesdb.cnf compares the two persistent
+engines across a thread and batch sweep.
+
+  [bench]
+  backend  = rocksdb,tidesdb
+  ops      = 2000000
+  threads  = 1,8,16,32,64
+  batch    = 1,64,256,512,1024
+  repeat   = 3
+  report_dir = ./results
+  workload = workloads/mixed.lua
+  workload = workloads/cart.lua
+
+  [rocksdb]
+  write_buffer_size = 64M
+  compression = kNoCompression
+
+  [tidesdb]
+  write_buffer_size = 64M
+  compression = none
+  enable_bloom_filter = 1
+
+Run it.
+
+  ./keybench --config samples/rocksdb-vs-tidesdb.cnf
+
+Because --report-dir also drops a replay config beside its reports, any run can
+be reproduced from the directory it wrote.
+
+That sample doubles as a reference. Every engine knob keybench understands is
+listed in it, the active lines being the overrides the parity run applies and
+the rest shown commented next to its real default, so the whole tuning surface
+is visible in one place. The defaults printed there were read from the installed
+libraries, so they track the engine versions you actually link.
+
+Three rules govern an engine section. Sizes accept K, M, G, and T suffixes that
+mean powers of 1024, a bare number means bytes, and there is no B suffix, so
+write 64M and not 64MB. A value with no recognised suffix silently falls back to
+the default. A comment starts at the beginning of a line or after a space, which
+lets a value keep an inline semicolon, so a RocksDB nested option string such as
+block_based_table_factory = {block_cache=64M;filter_policy=bloomfilter:10:false}
+survives intact. The TidesDB section is a closed set that keybench maps field by
+field, while the RocksDB section is forwarded verbatim to RocksDB's own option
+string parser, so any key RocksDB accepts works and keybench sets only
+create_if_missing itself.
+
+
+Plotting
+========
+
+scripts/plot.py renders the tsv artifacts of one or more result directories
+into PDF figures, throughput bars, scalability curves, batch amortization,
+latency percentiles, and the live timelines. The system timeline figure carries
+every metric the system probe records, and the engine internals are drawn one
+figure per engine, since RocksDB and TidesDB report different metric names and
+so never share a panel. Every metric an engine emits gets a panel, including the
+ones that stay flat or zero for the whole run, since a constant is itself a fact
+worth seeing. Engine colors come from the BACKENDPALETTE file.
+
+The timeline figures are only as detailed as the samples behind them, so a run
+needs a sample interval and enough time per point to fill them. A short fixed
+ops run finishes each point in well under a second and leaves the timelines
+nearly empty. Give the run a timeline interval and either a seconds budget or a
+large ops count so the sampler fires many times.
+
+  python3 scripts/plot.py results/<timestamp> --out figures
+
+
+Writing a workload
+=================
+
+A workload file returns a table.
+
+  return { name = "mine", load = load, run = run }
+
+name labels the report. load is optional and runs once before timing to seed
+the store. run is the measured unit and runs many times. Both take ctx.
+
+  local function load(ctx)
+    for i = 0, ctx.items - 1 do
+      kv.put(string.format("k:%012d", i), tostring(i))
+    end
+  end
+
+  local function run(ctx)
+    local k = string.format("k:%012d", math.random(0, ctx.items - 1))
+    kv.get(k)
+  end
+
+ctx carries users, items, ops, seed, batch, and iter, the one based index of
+the current call. Each worker thread has its own Lua state and only the loader
+state ever runs load, so a value captured in load is nil inside a worker. Read
+the keyspace size from ctx on every run() call rather than from an upvalue set
+in load.
+
+The store orders keys by raw byte comparison. Format integer keys to a fixed
+zero padded width so byte order agrees with numeric order, otherwise "k:2"
+sorts after "k:10".
+
+The bundled workloads are worth reading as patterns.
+
+  mixed   a uniform random blend of get, put, del, and short range. A plain
+          baseline that reflects raw engine behavior.
+  cart    an Amazon style shopping cart, one key per line item under a per
+          user prefix, so "view cart" is one range scan. Traffic is skewed
+          toward hot users.
+  scan    the streaming range read kv.scan, which calls back per row and
+          builds no table, so a scan of millions of rows uses constant memory.
+  batch   the multi key verbs kv.mget and kv.mput. Sweeping --batch traces the
+          amortization curve.
+
+
+The kv verb set
+==============
+
+Every workload reaches the store through the global kv table. The same verbs
+hit whichever engine is selected.
+
+  kv.put(key, value)              store one key
+  kv.get(key)                     return the value, or nil if absent
+  kv.del(key)                     delete, return true if the key existed
+  kv.range(lo, hi, limit)         half open scan, return an array of {key,val}
+  kv.scan(lo, hi, fn, limit)      half open scan, call fn(key,val) per row,
+                                  return a truthy value to stop early
+  kv.mget(keys)                   array of keys in, array of values out
+  kv.mput(pairs)                  array of {key=,val=} stored together
+  kv.mdel(keys)                   delete an array of keys
+
+A range is half open, lo included and hi excluded. kv.range materializes the
+whole result as a Lua array. kv.scan streams and never builds a table, so it is
+the right verb for large reads. The callback passed to kv.scan must not call
+kv.put or kv.del, an engine that scans under its own read lock would deadlock on
+the re entrant write. mget, mput, and mdel record one latency sample but count
+batch primitive ops, which is how sweeping --batch shows amortization.
+
+
+Engines
+=======
+
+  skiplist   an in memory probabilistic skiplist guarded by a reader writer
+             lock. No dependency, no persistence, destroyed on close. The
+             reference engine and always compiled in.
+  rocksdb    the RocksDB LSM tree, persistent, opened in a fresh temp directory
+             under --data-dir. Any key in its [rocksdb] config section is passed
+             through as a RocksDB option string.
+  tidesdb    the TidesDB LSM tree, persistent and transactional, opened in a
+             fresh temp directory under --data-dir. Its [tidesdb] config section
+             tunes write buffer, compression, bloom filters, sync mode,
+             isolation, and compaction.
+
+Persistent engines store under --data-dir, which defaults to /tmp. Point it at
+a fast disk with room for the run.
+
+
+Hits and misses
+==============
+
+A hit and a miss in keybench are a logical fact, not a cache statistic. A get is
+a hit when the engine returns a live value and a miss when it returns nothing.
+The kv bridge times the call either way, files the sample in the get histogram,
+and then counts one hit or one miss from the return code. The batched verb
+kv.mget counts a hit or a miss for each key it carries. The console report shows
+the blend as a hit rate, the fraction of gets that found a key, and it appears
+only when the workload issued at least one get.
+
+The hit rate is the context you need to read the get latencies, because for an
+LSM engine a hit and a miss do not cost the same. The in memory skiplist is
+symmetric, a lookup either lands on the node or lands in the gap for about the
+same work. RocksDB and TidesDB are not. A read walks the memtable and then each
+level of sorted files from newest to oldest. A hit can stop the moment it finds
+the key in a high level. A miss is the worst case, because absence can only be
+proven by ruling out every file whose key range could hold the key.
+
+This is where the bloom filter earns its place and why these engines are called
+optimistic on the read path. Every sorted file carries a bloom filter, and the
+engine asks it whether a key could be present before it reads any block. A bloom
+filter has no false negatives, so a no skips that file with a few bit tests. For
+a key that never existed almost every file answers no, and a deep disk hunt
+collapses into memory. The cost is the false positive rate, set by bloom_fpr on
+TidesDB and by the filter bits on RocksDB, which is the small fraction of misses
+that still pay for one wasted file read.
+
+One case escapes the optimism, and the bundled workloads hit it. A key that was
+written and then deleted leaves a tombstone. Its old versions and the tombstone
+still sit in files whose bloom filters answer yes, so the engine reads, finds
+the tombstone, and reports a miss. That miss is not saved by the filter and is
+among the more expensive ones until compaction drops the tombstone. The mixed
+and cart workloads delete as they run, so their misses are mostly tombstone
+misses rather than never existed keys, which is the realistic and slightly
+adversarial case.
+
+The timeline reporter exposes the engine internals that explain these numbers.
+Alongside wu_per_s and ops_per_s it records, per sample, the engine's own
+counters, for TidesDB the live key count, level count, read amplification,
+tombstone count and ratio, flush and compaction counts and bytes, and the block
+cache hit rate, and for RocksDB the equivalent memtable, compaction, and block
+cache properties. Read the get hit rate and the get tail together with the
+tombstone ratio and read amplification and the picture is consistent.
+
+
+Adding an engine
+===============
+
+Create backends/<name>/. Implement the kv_backend vtable from src/bench.h, put,
+get, del, range, close, and the optional version, stats, and datadir. Write an
+open function with the backend_ctor signature and register it with
+KV_REGISTER_BACKEND. Add a backends/<name>/backend.mk that appends your source
+and libraries. Compile it in with make BACKENDS="skiplist <name>". The core
+never changes.
+
+
+Repository layout
+================
+
+  src/            the engine agnostic harness
+    main.c        argument parse, worker and sampler threads, the grid driver
+    kvlua.c       the kv verb set bridged into Lua
+    store.c       the thin vtable wrapper over a backend
+    registry.c    backend self registration
+    hist.c        the latency histogram
+    reporter.c    console, tsv, and timeline sinks
+    config.c      the INI config parser
+    probe_*.c     the system and build probes
+  backends/       one directory per engine
+  workloads/      the bundled Lua workloads
+  scripts/        plot.py and the Lua fetch helper
+  samples/        an example config
+  vendor/         the vendored Lua sources
+
+
+Version 0.1.0.

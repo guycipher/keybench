@@ -1,0 +1,19 @@
+vendor/
+
+Third-party source compiled into the benchmark. Currently: Lua.
+
+The default build (make) compiles vendor/*.c into a static iblua.a and
+links it, so the tool is self-contained and reproducible. This directory ships
+empty -- populate it once:
+    scripts/fetch-lua.sh            # latest pinned version (5.4.x)
+    scripts/fetch-lua.sh 5.4.7      # a specific version
+
+
+The Makefile excludes lua.c and luac.c from liblua.a (each defines its own
+main() -- the standalone interpreter and the bytecode compiler).
+
+Prefer not to vendor? Build against a system Lua instead:
+
+make LUA_SYS=1                  # uses pkg-config for lua5.4 / lua
+
+Vendored *.c / *.h / *.o and liblua.a are git-ignored (see .gitignore).
