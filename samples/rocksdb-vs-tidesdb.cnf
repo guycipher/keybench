@@ -15,10 +15,13 @@
 
 [bench]
 backend  = rocksdb,tidesdb
-ops      = 100000000
 threads  = 1,8,16,32,64
 batch    = 1,64,256,512,1024
 repeat   = 3
+secs     = 900
+# near 100 GB each.
+items    = 25000000
+users    = 4500000
 report_dir = ./results
 # Sample interval in seconds for the realtime timeline. Without this the
 # timeline reporter is created but stays empty, since no sampler runs. Set to 0
