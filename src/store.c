@@ -54,6 +54,16 @@ int store_put(kv_store *s, const char *k, size_t klen, const char *v, size_t vle
     return s->be->put(s->be->ctx, k, klen, v, vlen);
 }
 
+int store_putbatch(kv_store *s, const char *const *keys, const size_t *klens,
+                   const char *const *vals, const size_t *vlens, int n)
+{
+    if (s->be->putbatch) return s->be->putbatch(s->be->ctx, keys, klens, vals, vlens, n);
+    int rc = 0;
+    for (int i = 0; i < n; i++)
+        if (s->be->put(s->be->ctx, keys[i], klens[i], vals[i], vlens[i]) != 0) rc = -1;
+    return rc;
+}
+
 int store_get(kv_store *s, const char *k, size_t klen, char **vp, size_t *vlen)
 {
     const char *bv;
@@ -70,6 +80,15 @@ int store_get(kv_store *s, const char *k, size_t klen, char **vp, size_t *vlen)
 int store_del(kv_store *s, const char *k, size_t klen)
 {
     return s->be->del(s->be->ctx, k, klen);
+}
+
+int store_delbatch(kv_store *s, const char *const *keys, const size_t *klens, int n)
+{
+    if (s->be->delbatch) return s->be->delbatch(s->be->ctx, keys, klens, n);
+    int rc = 0;
+    for (int i = 0; i < n; i++)
+        if (s->be->del(s->be->ctx, keys[i], klens[i]) < 0) rc = -1;
+    return rc;
 }
 
 int store_range(kv_store *s, const char *lo, size_t lolen, const char *hi, size_t hilen, int limit,

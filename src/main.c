@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -82,6 +83,23 @@ uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+#ifndef TMPFS_MAGIC
+#define TMPFS_MAGIC 0x01021994
+#endif
+#ifndef RAMFS_MAGIC
+#define RAMFS_MAGIC 0x858458f6
+#endif
+
+/* True when dir sits on a RAM backed filesystem, where a persistent engine would
+   silently benchmark memory instead of a disk. */
+static int is_ram_fs(const char *dir)
+{
+    struct statfs s;
+    if (statfs(dir, &s) != 0) return 0;
+    unsigned long t = (unsigned long)s.f_type;
+    return t == TMPFS_MAGIC || t == RAMFS_MAGIC;
+}
+
 typedef struct
 {
     long ops;
@@ -128,9 +146,9 @@ static double median_d(double *a, int n)
     return (n & 1) ? a[n / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2]);
 }
 
-static int make_ctx(lua_State *L, const config *c)
+static int make_ctx(lua_State *L, const config *c, int tid, int nthreads)
 {
-    lua_createtable(L, 0, 6);
+    lua_createtable(L, 0, 8);
     lua_pushinteger(L, c->users);
     lua_setfield(L, -2, "users");
     lua_pushinteger(L, c->items);
@@ -141,6 +159,10 @@ static int make_ctx(lua_State *L, const config *c)
     lua_setfield(L, -2, "seed");
     lua_pushinteger(L, c->batch);
     lua_setfield(L, -2, "batch");
+    lua_pushinteger(L, tid);
+    lua_setfield(L, -2, "thread");
+    lua_pushinteger(L, nthreads);
+    lua_setfield(L, -2, "threads");
     lua_pushinteger(L, 0);
     lua_setfield(L, -2, "iter");
     return luaL_ref(L, LUA_REGISTRYINDEX);
@@ -177,6 +199,7 @@ typedef struct
     kv_store *store;
     long ops;
     unsigned seed;
+    int tid, nthreads;
 
     kvlua_ctx kc;
     long units;
@@ -197,7 +220,7 @@ static void *worker_main(void *arg)
         return NULL;
     }
     int wl = luaL_ref(L, LUA_REGISTRYINDEX);
-    int ctx = make_ctx(L, cfg);
+    int ctx = make_ctx(L, cfg, w->tid, w->nthreads);
 
     lua_rawgeti(L, LUA_REGISTRYINDEX, wl);
     lua_getfield(L, -1, "run");
@@ -397,6 +420,46 @@ static void *progress_main(void *arg)
     return NULL;
 }
 
+typedef struct
+{
+    const char *path;
+    const config *cfg;
+    kv_store *store;
+    int tid, nthreads;
+    int err;
+} load_worker;
+
+/* Seed a shard of the dataset in parallel. The workload's load() reads
+   ctx.thread and ctx.threads to write only its slice, and ctx.batch to group
+   writes, so N threads fill the store together instead of one doing it all. */
+static void *load_worker_main(void *arg)
+{
+    load_worker *w = arg;
+    kvlua_ctx kc = {.store = w->store};
+    stats_reset(&kc.stats);
+    lua_State *L = open_workload(w->path, &kc, w->cfg->seed + (unsigned)w->tid);
+    if (!L)
+    {
+        w->err = 1;
+        return NULL;
+    }
+    lua_getfield(L, -1, "load");
+    if (lua_isfunction(L, -1))
+    {
+        int ctx = make_ctx(L, w->cfg, w->tid, w->nthreads);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, ctx);
+        if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+        {
+            fprintf(stderr, "\nload() error: %s\n", lua_tostring(L, -1));
+            w->err = 1;
+        }
+    }
+    else
+        lua_pop(L, 1);
+    lua_close(L);
+    return NULL;
+}
+
 static void run_measurement(const char *path, const config *cfg, char *name_out, size_t name_sz,
                             reporter_set *reporters, point_result *R)
 {
@@ -420,6 +483,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
     R->engine = store_version(store);
 
     char name[128] = "(unnamed)";
+    int has_load = 0;
     {
         kvlua_ctx kc = {.store = store};
         stats_reset(&kc.stats);
@@ -429,39 +493,52 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
             store_close(store);
             return;
         }
-
         lua_getfield(L, -1, "name");
         if (lua_isstring(L, -1)) snprintf(name, sizeof name, "%s", lua_tostring(L, -1));
         lua_pop(L, 1);
-
         lua_getfield(L, -1, "load");
-        if (lua_isfunction(L, -1))
-        {
-            int show = isatty(STDERR_FILENO);
-            uint64_t ls = now_ns();
-            if (show)
-            {
-                fprintf(stderr, "  seeding %s on %s ...", name, R->engine);
-                fflush(stderr);
-            }
-            int ctx = make_ctx(L, cfg);
-            lua_rawgeti(L, LUA_REGISTRYINDEX, ctx);
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK)
-            {
-                fprintf(stderr, "\n%s load() error: %s\n", name, lua_tostring(L, -1));
-                lua_close(L);
-                store_close(store);
-                return;
-            }
-            if (show) fprintf(stderr, " done (%.1fs)\n", (now_ns() - ls) / 1e9);
-        }
-        else
-        {
-            lua_pop(L, 1);
-        }
+        has_load = lua_isfunction(L, -1);
+        lua_pop(L, 1);
         lua_close(L);
     }
     if (name_out) snprintf(name_out, name_sz, "%s", name);
+
+    if (has_load)
+    {
+        int show = isatty(STDERR_FILENO);
+        uint64_t ls = now_ns();
+        if (show)
+        {
+            fprintf(stderr, "  seeding %s on %s with %d threads ...", name, R->engine, nthreads);
+            fflush(stderr);
+        }
+        load_worker *lw = calloc((size_t)nthreads, sizeof *lw);
+        pthread_t *ltids = calloc((size_t)nthreads, sizeof *ltids);
+        if (!lw || !ltids)
+        {
+            fprintf(stderr, "keybench: out of memory\n");
+            abort();
+        }
+        for (int t = 0; t < nthreads; t++)
+            lw[t] = (load_worker){
+                .path = path, .cfg = cfg, .store = store, .tid = t, .nthreads = nthreads, .err = 0};
+        for (int t = 0; t < nthreads; t++)
+            pthread_create(&ltids[t], NULL, load_worker_main, &lw[t]);
+        int lerr = 0;
+        for (int t = 0; t < nthreads; t++)
+        {
+            pthread_join(ltids[t], NULL);
+            if (lw[t].err) lerr = 1;
+        }
+        free(lw);
+        free(ltids);
+        if (show) fprintf(stderr, " done (%.1fs)\n", (now_ns() - ls) / 1e9);
+        if (lerr)
+        {
+            store_close(store);
+            return;
+        }
+    }
 
     worker *ws = calloc((size_t)nthreads, sizeof *ws);
     pthread_t *tids = calloc((size_t)nthreads, sizeof *tids);
@@ -480,6 +557,8 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
         ws[t].store = store;
         ws[t].ops = base + (t < rem ? 1 : 0);
         ws[t].seed = cfg->seed + (unsigned)t;
+        ws[t].tid = t;
+        ws[t].nthreads = nthreads;
     }
 
     uint64_t t0 = now_ns();
@@ -809,6 +888,7 @@ static void save_config(const char *path, const config *cfg, const char *engines
     fprintf(f, "items  = %ld\n", cfg->items);
     fprintf(f, "seed   = %u\n", cfg->seed);
     fprintf(f, "repeat = %d\n", repeat);
+    if (cfg->data_dir && *cfg->data_dir) fprintf(f, "data_dir = %s\n", cfg->data_dir);
     if (report_dir)
         fprintf(f, "report_dir = %s\n", report_dir);
     else if (report_arg)
@@ -922,7 +1002,8 @@ static void usage(const char *p)
         "replay.cnf there\n"
         "  --timeline S sample interval (s) for real-time stats; needs a timeline reporter\n"
         "  --probe L    system probes to run (default all; 'none' to disable); e.g. system\n"
-        "  --data-dir D base dir persistent engines store data under (default /tmp)\n"
+        "  --data-dir D directory persistent engines store data under, required for rocksdb "
+        "and tidesdb\n"
         "  --users N    user population knob (default 100000)\n"
         "  --items N    catalog size knob (default 100000)\n"
         "  --seed N     RNG seed (default 1)\n"
@@ -1061,6 +1142,26 @@ int main(int argc, char **argv)
         }
     }
     if (neng == 0) engines[neng++] = backend_find(NULL)->name;
+
+    int needs_dir = 0;
+    for (int i = 0; i < neng; i++)
+    {
+        const backend_entry *e = backend_find(engines[i]);
+        if (e && e->persistent) needs_dir = 1;
+    }
+    if (needs_dir && (!cfg.data_dir || !*cfg.data_dir))
+    {
+        fprintf(stderr,
+                "keybench: a persistent engine needs --data-dir, give a path on the drive you "
+                "mean to benchmark (skiplist is in memory and needs none)\n");
+        cfg_free(conf);
+        return 2;
+    }
+    if (cfg.data_dir && *cfg.data_dir && is_ram_fs(cfg.data_dir))
+        fprintf(stderr,
+                "keybench: warning, --data-dir %s is on a RAM filesystem, you would be "
+                "benchmarking memory and not a disk\n",
+                cfg.data_dir);
 
     int tlist[64] = {1}, blist[64] = {1}, ntp = 1, nbp = 1;
     if (threads_arg)

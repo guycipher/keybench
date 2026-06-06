@@ -51,10 +51,11 @@ reports as parallel. The Lua script stays single threaded and never reasons
 about locks.
 
 The workload is a Lua table. A file returns a table with a name, an optional
-load function, and a run function. load runs once, untimed, to seed the store.
-run is the measured unit and the harness calls it until the op budget or the
-time budget is spent. Both receive a ctx table carrying users, items, ops,
-seed, batch, and the current iter.
+load function, and a run function. load seeds the store before timing, and the
+harness runs it on every worker thread at once, each filling its own shard, so a
+large dataset loads in parallel. run is the measured unit and the harness calls
+it until the op budget or the time budget is spent. Both receive a ctx table
+carrying users, items, ops, seed, batch, thread, threads, and the current iter.
 
 The store is one verb set over every engine. Your script calls a global kv
 table. The same eight verbs reach whichever engine is selected. keybench times
@@ -157,7 +158,7 @@ untimed load phase, then one line per second, each its own line so the output
 scrolls as a log rather than rewriting one spot. A time bounded point shows the
 elapsed and budget seconds and the current rate.
 
-  seeding cart on rocksdb 11.1.1 ... done (1.8s)
+  seeding cart on rocksdb 11.1.1 with 8 threads ... done (1.8s)
   cart rocksdb 11.1.1 t8 b1    1.0/5s     776154 wu/s
   cart rocksdb 11.1.1 t8 b1    2.0/5s     626071 wu/s
   cart rocksdb 11.1.1 t8 b1    3.0/5s     578264 wu/s
@@ -183,8 +184,11 @@ Choosing the work
   --items N      size of the catalog a workload may address.
   --seed N       base RNG seed. Thread t uses seed plus t.
 
-A run is either count bounded or time bounded. Giving --secs clears the op
-count and runs the clock.
+These split into two kinds. --ops and --secs are the two ways to bound a run and
+you use one of them, since giving --secs clears the op count and runs the clock.
+--users, --items, and --seed are not a choice between, they always apply, each
+handed to the workload through ctx to size its population, size its catalog, and
+seed its RNG. So a run is one bound flag plus any of the three knobs at once.
 
 
 Sweeping and comparing
@@ -207,7 +211,7 @@ reduced to a median, which damps the noise of a single run. An example that
 compares two engines as they scale.
 
   ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
-             workloads/mixed.lua
+             --data-dir /mnt/disk workloads/mixed.lua
 
 Name several files to run them in sequence, each isolated in its own fresh
 store.
@@ -242,10 +246,11 @@ and tells you where.
 Probes
 ======
 
-A probe records context the benchmark itself does not produce. The system
-probe reports the host, CPU, memory, and free disk, and samples CPU percent,
-resident memory, load, faults, and IO while the run proceeds. The build probe
-reports the keybench version, compiler, and allocator.
+A probe records context the benchmark itself does not produce. The system probe
+reports the host, CPU, memory, free disk, and the device, mount, filesystem, and
+solid state or rotational nature of the drive backing --data-dir, and samples
+CPU percent, resident memory, load, faults, and IO while the run proceeds. The
+build probe reports the keybench version, compiler, and allocator.
 
   --probe L      a comma list of probes, or none to disable, or all by default.
 
@@ -270,6 +275,7 @@ engines across a thread and batch sweep.
   batch    = 1,64,256,512,1024
   repeat   = 3
   report_dir = ./results
+  data_dir = /mnt/disk
   workload = workloads/mixed.lua
   workload = workloads/cart.lua
 
@@ -307,6 +313,94 @@ string parser, so any key RocksDB accepts works and keybench sets only
 create_if_missing itself.
 
 
+Examples
+========
+
+The execution model in one breath. A run is a grid, the cross product of the
+engine list, the thread list, and the batch list, and keybench runs that grid
+once per workload file, in the order the files are given. Each cell of the grid
+is measured --repeat times and reduced to a median. Every measurement opens a
+fresh engine store in its own temporary directory under --data-dir, runs the
+untimed load to seed it, runs the timed phase, then tears the store down, so no
+two measurements share state. Worker thread t seeds its RNG with seed plus t,
+and the repeats of a cell reuse the same seeds, so --repeat measures run to run
+noise rather than seed variance.
+
+Two precedence rules are worth holding. A --config file supplies the defaults
+and any flag you also pass on the command line overrides it. --report-dir takes
+over reporting, bundling a console report, a points tsv, a timeline tsv, and a
+replay config into one stamped directory, and it overrides --report.
+
+A persistent engine needs --data-dir, a path on the disk you are benchmarking,
+so the rocksdb and tidesdb examples below pass one, written here as /mnt/disk.
+Point it at your own drive.
+
+The smallest run, one workload against the default skiplist for 200000 units on
+one thread.
+
+  ./keybench workloads/mixed.lua
+
+Run for a fixed time instead of a fixed count.
+
+  ./keybench --secs 30 workloads/mixed.lua
+
+Compare engines. The backend list is the first grid dimension.
+
+  ./keybench --backend skiplist,rocksdb,tidesdb --data-dir /mnt/disk workloads/mixed.lua
+
+Scale across threads. The thread list is a sweep, here six points.
+
+  ./keybench --backend tidesdb --threads 1,2,4,8,16,32 --secs 20 --data-dir /mnt/disk workloads/cart.lua
+
+Trace batch amortization. Only batch.lua reads ctx.batch, so the batch list
+sweeps it while a workload that does not opt in runs once at batch one.
+
+  ./keybench --backend rocksdb --batch 1,8,64,512 --ops 2000000 --data-dir /mnt/disk workloads/batch.lua
+
+A full grid with repeats. Two engines by four thread counts is eight cells, each
+run three times and reduced to a median, with a summary table at the end.
+
+  ./keybench --backend rocksdb,tidesdb --threads 1,8,16,32 --repeat 3 --secs 20 --data-dir /mnt/disk workloads/cart.lua
+
+Run several workloads in sequence. Each gets the whole grid, isolated in its own
+fresh store.
+
+  ./keybench --backend rocksdb,tidesdb --threads 1,8,16 --data-dir /mnt/disk workloads/mixed.lua workloads/cart.lua workloads/scan.lua
+
+Shape the workload with the knobs. A larger catalog and user population with a
+fixed seed for a reproducible keyspace.
+
+  ./keybench --backend tidesdb --users 500000 --items 1000000 --seed 7 --secs 30 --data-dir /mnt/disk workloads/cart.lua
+
+Write machine readable output alongside the console report. tsv is one row per
+operation per cell, timeline is one row per live sample, both to files.
+
+  ./keybench --backend rocksdb,tidesdb --threads 1,8,16 --report console,tsv:points.tsv,timeline:tl.tsv --timeline 1 --data-dir /mnt/disk workloads/cart.lua
+
+Bundle everything for a result you keep, on a fast disk. --report-dir stamps a
+directory and drops the console report, the points tsv, the timeline tsv, and a
+replay config into it, and with --timeline the timeline fills.
+
+  ./keybench --backend rocksdb,tidesdb --threads 1,8,16,32 --repeat 3 --secs 20 --timeline 1 --report-dir ./results --data-dir /mnt/fast/bench workloads/cart.lua
+
+Drive a whole comparison from a config, and override a knob for a quick dry run.
+The [bench] section holds the run, an engine section tunes that engine, and any
+flag still wins over the file.
+
+  ./keybench --config samples/rocksdb-vs-tidesdb.cnf
+  ./keybench --config samples/rocksdb-vs-tidesdb.cnf --secs 3 --threads 1,4
+
+Save the effective run as a replay config, then rerun it byte for byte later.
+
+  ./keybench --backend rocksdb,tidesdb --threads 1,8,16 --secs 20 --data-dir /mnt/disk --save-config run.cnf workloads/cart.lua
+  ./keybench --config run.cnf
+
+Quiet the probes for the leanest output, or name only the one you want.
+
+  ./keybench --probe none workloads/mixed.lua
+  ./keybench --probe system workloads/mixed.lua
+
+
 Plotting
 ========
 
@@ -339,14 +433,14 @@ A workload file returns a table.
 
   return { name = "mine", load = load, run = run }
 
-name labels the report. load is optional and runs once before timing to seed
-the store. run is the measured unit and runs many times. Both take ctx. A
-workload that reads ctx.batch through kv.mget or kv.mput also returns batched =
-true, which tells keybench to sweep it over the batch sizes. Without that the
-batch sweep is skipped for the file and it runs once at batch one.
+name labels the report. load is optional and seeds the store before timing. run
+is the measured unit and runs many times. Both take ctx. A workload that reads
+ctx.batch through kv.mget or kv.mput also returns batched = true, which tells
+keybench to sweep it over the batch sizes. Without that the batch sweep is
+skipped for the file and it runs once at batch one.
 
   local function load(ctx)
-    for i = 0, ctx.items - 1 do
+    for i = ctx.thread, ctx.items - 1, ctx.threads do
       kv.put(string.format("k:%012d", i), tostring(i))
     end
   end
@@ -356,11 +450,20 @@ batch sweep is skipped for the file and it runs once at batch one.
     kv.get(k)
   end
 
-ctx carries users, items, ops, seed, batch, and iter, the one based index of
-the current call. Each worker thread has its own Lua state and only the loader
-state ever runs load, so a value captured in load is nil inside a worker. Read
-the keyspace size from ctx on every run() call rather than from an upvalue set
-in load.
+ctx carries users, items, ops, seed, batch, thread, threads, and iter, the one
+based index of the current call. load runs on every worker thread at once, each
+in its own Lua state, so seed only this thread's shard, the keys where i is
+ctx.thread of every ctx.threads, otherwise each thread would write the whole
+dataset. Grouping the writes into one kv.mput of ctx.batch keys makes a large
+seed commit as one engine batch. run runs in a fresh state too, so a value
+captured in load is not visible in it. Read the keyspace size from ctx on every
+run() call rather than from an upvalue.
+
+users and items are knobs the workload interprets, not fixed benchmark settings.
+keybench only forwards them through ctx. By convention items is the keyspace or
+catalog size and users is a user population count, but each workload uses only
+what it needs and gives them its own meaning. A workload that does not read a
+knob is unaffected by it.
 
 The store orders keys by raw byte comparison. Format integer keys to a fixed
 zero padded width so byte order agrees with numeric order, otherwise "k:2"
@@ -369,14 +472,19 @@ sorts after "k:10".
 The bundled workloads are worth reading as patterns.
 
   mixed   a uniform random blend of get, put, del, and short range. A plain
-          baseline that reflects raw engine behavior.
+          baseline that reflects raw engine behavior. Reads items as its
+          keyspace and ignores users. Seeds items keys at the value size set in
+          the file, so items times that size is the dataset, raise items to push
+          it into the gigabytes.
   cart    an Amazon style shopping cart, one key per line item under a per
-          user prefix, so "view cart" is one range scan. Traffic is skewed
-          toward hot users.
-  scan    the streaming range read kv.scan, which calls back per row and
-          builds no table, so a scan of millions of rows uses constant memory.
+          user prefix, so "view cart" is one range scan. Reads users as the
+          number of carts to seed, so the dataset grows with it, and items as
+          the catalog its products spread across. Traffic skews to hot users.
+  scan    the streaming range read kv.scan, which calls back per row and builds
+          no table, so a scan of millions of rows uses constant memory. Reads
+          items as its keyspace and ignores users.
   batch   the multi key verbs kv.mget and kv.mput. Sweeping --batch traces the
-          amortization curve.
+          amortization curve. Reads items as its keyspace and ignores users.
 
 
 The kv verb set
@@ -400,7 +508,9 @@ whole result as a Lua array. kv.scan streams and never builds a table, so it is
 the right verb for large reads. The callback passed to kv.scan must not call
 kv.put or kv.del, an engine that scans under its own read lock would deadlock on
 the re entrant write. mget, mput, and mdel record one latency sample but count
-batch primitive ops, which is how sweeping --batch shows amortization.
+batch primitive ops, which is how sweeping --batch shows amortization. mput and
+mdel commit the whole batch as one engine write, a RocksDB write batch or a
+TidesDB transaction, rather than one write per key.
 
 
 Engines
@@ -417,8 +527,11 @@ Engines
              tunes write buffer, compression, bloom filters, sync mode,
              isolation, and compaction.
 
-Persistent engines store under --data-dir, which defaults to /tmp. Point it at
-a fast disk with room for the run.
+Persistent engines need --data-dir, a directory on the disk you mean to
+benchmark, and there is no default. A default could land in /tmp, which on many
+systems is tmpfs and would silently benchmark RAM, so keybench refuses to run a
+persistent engine without it and warns when the path is on a RAM filesystem.
+skiplist is in memory and needs none.
 
 
 Hits and misses
@@ -438,9 +551,12 @@ Adding an engine
 ===============
 
 Create backends/<name>/. Implement the kv_backend vtable from src/bench.h, put,
-get, del, range, close, and the optional version, stats, and datadir. Write an
-open function with the backend_ctor signature and register it with
-KV_REGISTER_BACKEND. Add a backends/<name>/backend.mk that appends your source
+get, del, range, close, and the optional version, stats, datadir, putbatch, and
+delbatch. The two batch ops write or delete many keys as one engine batch, and
+when left NULL the store loops put and del instead. Write an open function with
+the backend_ctor signature and register it with
+KV_REGISTER_BACKEND, passing 1 if it stores on disk and so needs --data-dir or 0
+if it is in memory. Add a backends/<name>/backend.mk that appends your source
 and libraries. Compile it in with make BACKENDS="skiplist <name>". The core
 never changes.
 
@@ -449,7 +565,7 @@ Repository layout
 ================
 
   src/            the engine agnostic harness
-    main.c        argument parse, worker and sampler threads, the grid driver
+    main.c        argument parse, worker sampler and progress threads, the grid driver
     kvlua.c       the kv verb set bridged into Lua
     store.c       the thin vtable wrapper over a backend
     registry.c    backend self registration

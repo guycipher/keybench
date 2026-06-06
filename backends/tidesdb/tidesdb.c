@@ -148,6 +148,42 @@ static int tdb_put(void *ctx, const char *k, size_t klen, const char *v, size_t 
     return rc == TDB_SUCCESS ? 0 : -1;
 }
 
+static int tdb_putbatch(void *ctx, const char *const *keys, const size_t *klens,
+                        const char *const *vals, const size_t *vlens, int n)
+{
+    tdb *t = ctx;
+    tidesdb_txn_t *txn = NULL;
+    if (tidesdb_txn_begin(t->db, &txn) != TDB_SUCCESS) return -1;
+    int rc = TDB_SUCCESS;
+    for (int i = 0; i < n; i++)
+    {
+        rc = tidesdb_txn_put(txn, t->cf, (const uint8_t *)keys[i], klens[i],
+                             (const uint8_t *)vals[i], vlens[i], TDB_NO_TTL);
+        if (rc != TDB_SUCCESS) break;
+    }
+    if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
+    tidesdb_txn_free(txn);
+    if (rc != TDB_SUCCESS) fprintf(stderr, "tidesdb putbatch failed (%d)\n", rc);
+    return rc == TDB_SUCCESS ? 0 : -1;
+}
+
+static int tdb_delbatch(void *ctx, const char *const *keys, const size_t *klens, int n)
+{
+    tdb *t = ctx;
+    tidesdb_txn_t *txn = NULL;
+    if (tidesdb_txn_begin(t->db, &txn) != TDB_SUCCESS) return -1;
+    int rc = TDB_SUCCESS;
+    for (int i = 0; i < n; i++)
+    {
+        rc = tidesdb_txn_delete(txn, t->cf, (const uint8_t *)keys[i], klens[i]);
+        if (rc != TDB_SUCCESS) break;
+    }
+    if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
+    tidesdb_txn_free(txn);
+    if (rc != TDB_SUCCESS) fprintf(stderr, "tidesdb delbatch failed (%d)\n", rc);
+    return rc == TDB_SUCCESS ? 0 : -1;
+}
+
 static int tdb_get(void *ctx, const char *k, size_t klen, const char **vp, size_t *vlen)
 {
     tdb *t = ctx;
@@ -421,8 +457,10 @@ kv_backend *tidesdb_backend_open(unsigned seed, const char *data_dir, const kv_o
     be->name = "tidesdb";
     be->ctx = t;
     be->put = tdb_put;
+    be->putbatch = tdb_putbatch;
     be->get = tdb_get;
     be->del = tdb_del;
+    be->delbatch = tdb_delbatch;
     be->range = tdb_range;
     be->close = tdb_close;
     be->version = tdb_version;
@@ -431,4 +469,4 @@ kv_backend *tidesdb_backend_open(unsigned seed, const char *data_dir, const kv_o
     return be;
 }
 
-KV_REGISTER_BACKEND("tidesdb", tidesdb_backend_open);
+KV_REGISTER_BACKEND("tidesdb", tidesdb_backend_open, 1);

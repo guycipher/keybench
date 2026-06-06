@@ -6,13 +6,19 @@
 -- skiplist, would deadlock on the reentrant write.
 
 local assert, type = assert, type
-local random, min, max = math.random, math.min, math.max
-local format, tonumber, tostring = string.format, tonumber, tostring
-local kv_put, kv_scan = kv.put, kv.scan
+local random, max = math.random, math.max
+local format, tonumber = string.format, tonumber
+local kv_scan, kv_mput = kv.scan, kv.mput
 
-local KEY_FMT       = "k:%012d"
-local SEED_KEYS_MAX = 200000
-local SCAN_WINDOW   = 1000
+local KEY_FMT     = "k:%012d"
+local SCAN_WINDOW = 1000
+
+-- Stored values are a fixed size opaque payload, built once per worker so the
+-- hot path allocates no per call value. The dataset is items times this size,
+-- so raise --items to scale the scanned set into the gigabytes. A repeated byte
+-- compresses away, so size a dataset this way only with compression off.
+local VALUE_BYTES = 4096
+local VALUE       = string.rep("v", VALUE_BYTES)
 
 -- The accumulator and the callback are defined once at module scope and reused on
 -- every run() so the hot path allocates neither a fresh closure nor a fresh
@@ -30,19 +36,33 @@ local function key(i)
   return format(KEY_FMT, i)
 end
 
+-- Seeding is sharded across the worker threads and batched. Each thread writes
+-- the slice of the keyspace it owns, ctx.thread of every ctx.threads, grouping
+-- ctx.batch keys into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
-  assert(type(ctx.items) == "number", "ctx.items must be a number")
-  local n = min(ctx.items, SEED_KEYS_MAX)
-  for i = 0, n - 1 do
-    kv_put(key(i), tostring(i))
+  assert(type(ctx.items) == "number" and ctx.items >= 1, "ctx.items must be >= 1")
+  assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
+  local b = max(1, ctx.batch)
+  local buf = {}
+  for j = 1, b do buf[j] = { key = "", val = VALUE } end
+  local n = 0
+  for i = ctx.thread, ctx.items - 1, ctx.threads do
+    n = n + 1
+    buf[n].key = key(i)
+    if n == b then kv_mput(buf); n = 0 end
+  end
+  if n > 0 then
+    local last = {}
+    for j = 1, n do last[j] = buf[j] end
+    kv_mput(last)
   end
 end
 
 local function run(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
-  local n = min(ctx.items, SEED_KEYS_MAX)
-  assert(n >= 0, "keyspace must be non-negative")
+  local n = ctx.items
+  assert(type(n) == "number" and n >= 1, "ctx.items must be >= 1")
   local start = random(0, max(0, n - SCAN_WINDOW))
   acc.sum = 0
   kv_scan(key(start), key(start + SCAN_WINDOW), scan_add)

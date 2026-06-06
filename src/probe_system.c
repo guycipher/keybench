@@ -1,4 +1,7 @@
 #define _DEFAULT_SOURCE
+#include <ctype.h>
+#include <limits.h>
+#include <mntent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +39,87 @@ static int proc_field(const char *path, const char *key, char *out, size_t n)
     }
     fclose(f);
     return found;
+}
+
+/* Find the mount that backs dir by taking the longest mount point that is a
+   prefix of its real path, and report that device, filesystem type, and mount
+   point. Returns 0 on success. */
+static int data_mount(const char *dir, char *dev, size_t devn, char *fstype, size_t fsn, char *mnt,
+                      size_t mntn)
+{
+    char rp[PATH_MAX];
+    if (!realpath(dir, rp)) snprintf(rp, sizeof rp, "%s", dir);
+    FILE *m = setmntent("/proc/mounts", "r");
+    if (!m) return -1;
+    struct mntent *e;
+    size_t best = 0;
+    int found = -1;
+    while ((e = getmntent(m)) != NULL)
+    {
+        size_t l = strlen(e->mnt_dir);
+        if (l >= best && strncmp(rp, e->mnt_dir, l) == 0 &&
+            (l == 1 || rp[l] == '/' || rp[l] == '\0'))
+        {
+            best = l;
+            snprintf(dev, devn, "%s", e->mnt_fsname);
+            snprintf(fstype, fsn, "%s", e->mnt_type);
+            snprintf(mnt, mntn, "%s", e->mnt_dir);
+            found = 0;
+        }
+    }
+    endmntent(m);
+    return found;
+}
+
+/* Reduce a partition device path to the parent block device name used under
+   /sys/block, so /dev/nvme0n1p2 becomes nvme0n1 and /dev/sda3 becomes sda. */
+static void base_block(const char *dev, char *out, size_t n)
+{
+    const char *p = dev;
+    if (strncmp(p, "/dev/", 5) == 0) p += 5;
+    snprintf(out, n, "%s", p);
+    if (strncmp(out, "nvme", 4) == 0 || strncmp(out, "mmcblk", 6) == 0)
+    {
+        char *pp = strrchr(out, 'p');
+        if (pp && isdigit((unsigned char)pp[1])) *pp = '\0';
+        return;
+    }
+    size_t len = strlen(out);
+    while (len > 0 && isdigit((unsigned char)out[len - 1])) out[--len] = '\0';
+}
+
+static void sys_disk(const char *dir, probe_info_cb cb, void *arg)
+{
+    char dev[128], fstype[32], mnt[256];
+    if (data_mount(dir, dev, sizeof dev, fstype, sizeof fstype, mnt, sizeof mnt) != 0) return;
+    char b[512];
+    snprintf(b, sizeof b, "%s on %s (%s)", dev, mnt, fstype);
+    cb(arg, "data_dev", b);
+
+    char base[128], path[256], line[128];
+    base_block(dev, base, sizeof base);
+    snprintf(path, sizeof path, "/sys/block/%s/queue/rotational", base);
+    FILE *rf = fopen(path, "r");
+    if (rf)
+    {
+        if (fgets(line, sizeof line, rf))
+            cb(arg, "data_disk", atoi(line) ? "rotational (HDD)" : "solid state");
+        fclose(rf);
+    }
+    snprintf(path, sizeof path, "/sys/block/%s/device/model", base);
+    FILE *mf = fopen(path, "r");
+    if (mf)
+    {
+        if (fgets(line, sizeof line, mf))
+        {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            size_t l = strlen(line);
+            while (l > 0 && line[l - 1] == ' ') line[--l] = '\0';
+            if (l > 0) cb(arg, "data_disk_model", line);
+        }
+        fclose(mf);
+    }
 }
 
 static void sys_info(probe_info_cb cb, void *arg)
@@ -90,6 +174,7 @@ static void sys_info(probe_info_cb cb, void *arg)
         snprintf(label, sizeof label, "data_fs(%s)", dir);
         cb(arg, label, b);
     }
+    sys_disk(dir, cb, arg);
 }
 
 static void sys_sample(probe_metric_cb cb, void *arg)

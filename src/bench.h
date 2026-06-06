@@ -26,8 +26,15 @@ typedef struct kv_backend
     void *ctx;
 
     int (*put)(void *ctx, const char *k, size_t klen, const char *v, size_t vlen);
+    /* Optional. Write n key value pairs as one engine batch, a single WAL append
+       or transaction. NULL means the store loops put instead. */
+    int (*putbatch)(void *ctx, const char *const *keys, const size_t *klens,
+                    const char *const *vals, const size_t *vlens, int n);
     int (*get)(void *ctx, const char *k, size_t klen, const char **vp, size_t *vlen);
     int (*del)(void *ctx, const char *k, size_t klen);
+    /* Optional. Delete n keys as one engine batch. NULL means the store loops
+       del instead. */
+    int (*delbatch)(void *ctx, const char *const *keys, const size_t *klens, int n);
     int (*range)(void *ctx, const char *lo, size_t lolen, const char *hi, size_t hilen, int limit,
                  kv_range_cb cb, void *cbarg);
     void (*close)(void *ctx);

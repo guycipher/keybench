@@ -77,8 +77,10 @@ else
   # must stay out of the archive.
   LUA_SRC := $(filter-out $(LUA_DIR)/lua.c $(LUA_DIR)/luac.c,$(wildcard $(LUA_DIR)/*.c))
   LUA_OBJ := $(LUA_SRC:.c=.o)
+  # LUA_USE_POSIX routes os.tmpname through mkstemp instead of tmpnam, which
+  # also silences the linker's tmpnam warning, and is the intended POSIX build.
   $(LUA_DIR)/%.o: $(LUA_DIR)/%.c
-	$(CC) -O2 -w -c $< -o $@
+	$(CC) -O2 -w -DLUA_USE_POSIX -c $< -o $@
   $(LUA_LIB): $(LUA_OBJ)
 	ar rcs $@ $(LUA_OBJ)
   $(BIN): $(SRC) $(LUA_LIB)

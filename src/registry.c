@@ -8,11 +8,12 @@
 static backend_entry g_backends[MAX_BACKENDS];
 static int g_n;
 
-void backend_register(const char *name, backend_ctor open)
+void backend_register(const char *name, backend_ctor open, int persistent)
 {
     if (g_n >= MAX_BACKENDS) return;
     g_backends[g_n].name = name;
     g_backends[g_n].open = open;
+    g_backends[g_n].persistent = persistent;
     g_n++;
 }
 

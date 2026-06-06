@@ -299,7 +299,7 @@ static int l_mput(lua_State *L)
         lua_pop(L, 1);
     }
     uint64_t t0 = now_ns();
-    for (int i = 0; i < n; i++) store_put(kc->store, kp[i], kl[i], vp[i], vl[i]);
+    store_putbatch(kc->store, kp, kl, vp, vl, n);
     hist_record(&kc->stats.h[OP_MPUT], now_ns() - t0);
     KV_RELAXED_ADD(kc->stats.prim_ops, (uint64_t)n);
     return 0;
@@ -320,13 +320,12 @@ static int l_mdel(lua_State *L)
         kp[i] = luaL_checklstring(L, -1, &kl[i]);
         lua_pop(L, 1);
     }
-    int existed = 0;
     uint64_t t0 = now_ns();
-    for (int i = 0; i < n; i++) existed += store_del(kc->store, kp[i], kl[i]);
+    store_delbatch(kc->store, kp, kl, n);
     hist_record(&kc->stats.h[OP_MDEL], now_ns() - t0);
     KV_RELAXED_ADD(kc->stats.prim_ops, (uint64_t)n);
 
-    lua_pushinteger(L, existed);
+    lua_pushinteger(L, n);
     return 1;
 }
 

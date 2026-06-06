@@ -13,7 +13,7 @@ local assert, type = assert, type
 local random, floor, max = math.random, math.floor, math.max
 local format = string.format
 local ipairs = ipairs
-local kv_get, kv_put, kv_del, kv_range = kv.get, kv.put, kv.del, kv.range
+local kv_get, kv_put, kv_del, kv_range, kv_mput = kv.get, kv.put, kv.del, kv.range, kv.mput
 
 -- A real shopper touches a small, stable set of products, not the whole catalog.
 -- pick_item maps a user id through a multiplicative hash to a fixed window of
@@ -27,10 +27,16 @@ local KNUTH_MULT = 2654435761
 -- Zipf table. A HOT_SKEW of one would make selection uniform again.
 local HOT_SKEW = 2.0
 
--- Item and value formats. Ids are zero padded to a fixed width so the store's
--- byte ordering of keys matches their numeric ordering.
+-- Item ids are zero padded to a fixed width so the store's byte ordering of keys
+-- matches their numeric ordering.
 local LINE_KEY_FMT = "u:%010d:c:%010d"
-local VALUE_FMT    = "qty=%d;price=%d"
+
+-- A line item value is a fixed size opaque payload, built once per worker so the
+-- hot path allocates no per call value. Cart size on disk grows with users and
+-- with this size, so raise --users to scale into the gigabytes. A repeated byte
+-- compresses away, so size a dataset this way only with compression off.
+local VALUE_BYTES  = 4096
+local VALUE        = string.rep("v", VALUE_BYTES)
 
 -- A user's line items all share a per user prefix that ends in a colon byte.
 -- The next byte value after that colon is the semicolon, so a lower bound ending
@@ -43,12 +49,6 @@ local BOUNDS_HI_FMT = "u:%010d:c;"
 -- more, so carts are not empty when the measured phase begins.
 local SEED_ITEMS_MIN  = 3
 local SEED_ITEMS_RAND = 5
-
-local QTY_MIN        = 1
-local QTY_MAX_ADD    = 3
-local QTY_MAX_UPDATE = 9
-local PRICE_MIN      = 100
-local PRICE_MAX      = 9999
 
 -- Cumulative percentage thresholds for the operation mix, weighted to resemble
 -- real cart traffic. Most calls are adds and views, fewer are single reads and
@@ -85,16 +85,30 @@ local function cart_bounds(uid)
   return format(BOUNDS_LO_FMT, uid), format(BOUNDS_HI_FMT, uid)
 end
 
+-- Seeding is sharded across the worker threads and batched. Each thread seeds
+-- the users it owns, ctx.thread of every ctx.threads, grouping ctx.batch line
+-- items into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
   local users, items = ctx.users, ctx.items
   assert(type(users) == "number" and type(items) == "number", "users/items must be numbers")
-  for uid = 0, users - 1 do
+  assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
+  local b = max(1, ctx.batch)
+  local buf = {}
+  for j = 1, b do buf[j] = { key = "", val = VALUE } end
+  local n = 0
+  for uid = ctx.thread, users - 1, ctx.threads do
     local count = SEED_ITEMS_MIN + random(0, SEED_ITEMS_RAND)
     for _ = 1, count do
-      kv_put(line_key(uid, pick_item(uid, items)),
-             format(VALUE_FMT, random(QTY_MIN, QTY_MAX_ADD), random(PRICE_MIN, PRICE_MAX)))
+      n = n + 1
+      buf[n].key = line_key(uid, pick_item(uid, items))
+      if n == b then kv_mput(buf); n = 0 end
     end
+  end
+  if n > 0 then
+    local last = {}
+    for j = 1, n do last[j] = buf[j] end
+    kv_mput(last)
   end
 end
 
@@ -105,16 +119,14 @@ local function run(ctx)
   local uid = hot_user(users)
   local roll = random(PCT)
   if roll <= W_ADD then
-    kv_put(line_key(uid, pick_item(uid, items)),
-           format(VALUE_FMT, random(QTY_MIN, QTY_MAX_ADD), random(PRICE_MIN, PRICE_MAX)))
+    kv_put(line_key(uid, pick_item(uid, items)), VALUE)
   elseif roll <= W_VIEW then
     local lo, hi = cart_bounds(uid)
     kv_range(lo, hi)
   elseif roll <= W_GET then
     kv_get(line_key(uid, pick_item(uid, items)))
   elseif roll <= W_UPDATE then
-    kv_put(line_key(uid, pick_item(uid, items)),
-           format(VALUE_FMT, random(QTY_MIN, QTY_MAX_UPDATE), random(PRICE_MIN, PRICE_MAX)))
+    kv_put(line_key(uid, pick_item(uid, items)), VALUE)
   elseif roll <= W_REMOVE then
     kv_del(line_key(uid, pick_item(uid, items)))
   else

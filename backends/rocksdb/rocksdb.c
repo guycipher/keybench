@@ -42,6 +42,41 @@ static int rdb_put(void *ctx, const char *k, size_t klen, const char *v, size_t 
     return 0;
 }
 
+static int rdb_putbatch(void *ctx, const char *const *keys, const size_t *klens,
+                        const char *const *vals, const size_t *vlens, int n)
+{
+    rdb *r = ctx;
+    rocksdb_writebatch_t *wb = rocksdb_writebatch_create();
+    for (int i = 0; i < n; i++) rocksdb_writebatch_put(wb, keys[i], klens[i], vals[i], vlens[i]);
+    char *err = NULL;
+    rocksdb_write(r->db, r->wopt, wb, &err);
+    rocksdb_writebatch_destroy(wb);
+    if (err)
+    {
+        fprintf(stderr, "rocksdb putbatch: %s\n", err);
+        free(err);
+        return -1;
+    }
+    return 0;
+}
+
+static int rdb_delbatch(void *ctx, const char *const *keys, const size_t *klens, int n)
+{
+    rdb *r = ctx;
+    rocksdb_writebatch_t *wb = rocksdb_writebatch_create();
+    for (int i = 0; i < n; i++) rocksdb_writebatch_delete(wb, keys[i], klens[i]);
+    char *err = NULL;
+    rocksdb_write(r->db, r->wopt, wb, &err);
+    rocksdb_writebatch_destroy(wb);
+    if (err)
+    {
+        fprintf(stderr, "rocksdb delbatch: %s\n", err);
+        free(err);
+        return -1;
+    }
+    return 0;
+}
+
 static int rdb_get(void *ctx, const char *k, size_t klen, const char **vp, size_t *vlen)
 {
     rdb *r = ctx;
@@ -243,8 +278,10 @@ kv_backend *rocksdb_backend_open(unsigned seed, const char *data_dir, const kv_o
     be->name = "rocksdb";
     be->ctx = r;
     be->put = rdb_put;
+    be->putbatch = rdb_putbatch;
     be->get = rdb_get;
     be->del = rdb_del;
+    be->delbatch = rdb_delbatch;
     be->range = rdb_range;
     be->close = rdb_close;
     be->version = rdb_version;
@@ -253,4 +290,4 @@ kv_backend *rocksdb_backend_open(unsigned seed, const char *data_dir, const kv_o
     return be;
 }
 
-KV_REGISTER_BACKEND("rocksdb", rocksdb_backend_open);
+KV_REGISTER_BACKEND("rocksdb", rocksdb_backend_open, 1);

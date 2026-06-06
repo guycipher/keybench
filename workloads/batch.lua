@@ -6,15 +6,20 @@
 -- one degrades to single key calls and gives the unbatched baseline.
 
 local assert, type = assert, type
-local random, min, max = math.random, math.min, math.max
-local format, tostring = string.format, tostring
-local kv_put, kv_mget, kv_mput = kv.put, kv.mget, kv.mput
+local random, max = math.random, math.max
+local format = string.format
+local kv_mget, kv_mput = kv.mget, kv.mput
 
-local KEY_FMT       = "k:%012d"
-local UPDATE_VALUE  = "updated"
-local SEED_KEYS_MAX = 200000
-local PCT           = 100
-local W_MGET        = 60
+local KEY_FMT = "k:%012d"
+local PCT     = 100
+local W_MGET  = 60
+
+-- Stored values are a fixed size opaque payload, built once per worker so the
+-- hot path allocates no per call value. The dataset is items times this size,
+-- so raise --items to scale the working set into the gigabytes. A repeated byte
+-- compresses away, so size a dataset this way only with compression off.
+local VALUE_BYTES = 4096
+local VALUE       = string.rep("v", VALUE_BYTES)
 
 -- These buffers are reused on every run() so the hot path allocates no per call
 -- tables. ctx.batch is fixed for a measurement, so each buffer grows to that size
@@ -32,19 +37,34 @@ local function rnd(n)
   return random(0, n - 1)
 end
 
+-- Seeding is sharded across the worker threads and batched. Each thread writes
+-- the slice of the keyspace it owns, ctx.thread of every ctx.threads, grouping
+-- ctx.batch keys into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
-  assert(type(ctx.items) == "number", "ctx.items must be a number")
-  local n = min(ctx.items, SEED_KEYS_MAX)
-  for i = 0, n - 1 do
-    kv_put(key(i), tostring(i))
+  assert(type(ctx.items) == "number" and ctx.items >= 1, "ctx.items must be >= 1")
+  assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
+  local b = max(1, ctx.batch)
+  local buf = {}
+  for j = 1, b do buf[j] = { key = "", val = VALUE } end
+  local n = 0
+  for i = ctx.thread, ctx.items - 1, ctx.threads do
+    n = n + 1
+    buf[n].key = key(i)
+    if n == b then kv_mput(buf); n = 0 end
+  end
+  if n > 0 then
+    local last = {}
+    for j = 1, n do last[j] = buf[j] end
+    kv_mput(last)
   end
 end
 
 local function run(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
   assert(type(ctx.batch) == "number" and ctx.batch >= 1, "ctx.batch must be a number >= 1")
-  local n = min(ctx.items, SEED_KEYS_MAX)
+  assert(type(ctx.items) == "number" and ctx.items >= 1, "ctx.items must be >= 1")
+  local n = ctx.items
   local b = max(1, ctx.batch)
   if random(PCT) <= W_MGET then
     for j = 1, b do mget_buf[j] = key(rnd(n)) end
@@ -54,7 +74,7 @@ local function run(ctx)
       local pair = mput_buf[j]
       if pair == nil then pair = {}; mput_buf[j] = pair end
       pair.key = key(rnd(n))
-      pair.val = UPDATE_VALUE
+      pair.val = VALUE
     end
     kv_mput(mput_buf)
   end

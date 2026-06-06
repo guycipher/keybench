@@ -17,9 +17,12 @@ const char *store_datadir(const kv_store *s);
 void store_stats(kv_store *s, kv_stat_cb cb, void *arg);
 
 int store_put(kv_store *s, const char *k, size_t klen, const char *v, size_t vlen);
+int store_putbatch(kv_store *s, const char *const *keys, const size_t *klens,
+                   const char *const *vals, const size_t *vlens, int n);
 
 int store_get(kv_store *s, const char *k, size_t klen, char **vp, size_t *vlen);
 int store_del(kv_store *s, const char *k, size_t klen);
+int store_delbatch(kv_store *s, const char *const *keys, const size_t *klens, int n);
 int store_range(kv_store *s, const char *lo, size_t lolen, const char *hi, size_t hilen, int limit,
                 kv_range_cb cb, void *arg);
 

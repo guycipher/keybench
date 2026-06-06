@@ -245,4 +245,4 @@ kv_backend *skiplist_backend_open(unsigned seed, const char *data_dir, const kv_
     return be;
 }
 
-KV_REGISTER_BACKEND("skiplist", skiplist_backend_open);
+KV_REGISTER_BACKEND("skiplist", skiplist_backend_open, 0);

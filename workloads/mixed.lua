@@ -12,20 +12,21 @@
 -- engine it cancels out when engines are compared and only shifts the absolutes.
 
 local assert, type = assert, type
-local random, min = math.random, math.min
+local random, max = math.random, math.max
 local format = string.format
-local kv_get, kv_put, kv_del, kv_range = kv.get, kv.put, kv.del, kv.range
+local kv_get, kv_put, kv_del, kv_range, kv_mput = kv.get, kv.put, kv.del, kv.range, kv.mput
 
 -- The store orders keys by raw byte comparison, so an index is formatted to a
 -- fixed zero padded width to make that byte order agree with numeric order.
 -- Without the padding the key for two would sort after the key for ten.
-local KEY_FMT       = "k:%012d"
-local VALUE_FMT     = "v%d"
-local UPDATE_VALUE  = "updated"
+local KEY_FMT = "k:%012d"
 
--- The load phase is untimed but still real work, so the seeded keyspace is capped
--- to keep startup quick when --items is large.
-local SEED_KEYS_MAX = 200000
+-- Stored values are a fixed size opaque payload, built once per worker so the
+-- hot path allocates no per call value. The dataset is items times this size,
+-- so raise --items to scale the working set into the gigabytes. A repeated byte
+-- compresses away, so size a dataset this way only with compression off.
+local VALUE_BYTES = 4096
+local VALUE       = string.rep("v", VALUE_BYTES)
 
 -- An operation is chosen per call by a percentage roll against these cumulative
 -- thresholds, weighted to resemble a read mostly service. SCAN_WINDOW is the
@@ -48,12 +49,26 @@ local function rnd(n)
   return v
 end
 
+-- Seeding is sharded across the worker threads and batched. Each thread writes
+-- the slice of the keyspace it owns, ctx.thread of every ctx.threads, grouping
+-- ctx.batch keys into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
-  assert(type(ctx.items) == "number", "ctx.items must be a number")
-  local n = min(ctx.items, SEED_KEYS_MAX)
-  for i = 0, n - 1 do
-    kv_put(key(i), format(VALUE_FMT, i))
+  assert(type(ctx.items) == "number" and ctx.items >= 1, "ctx.items must be >= 1")
+  assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
+  local b = max(1, ctx.batch)
+  local buf = {}
+  for j = 1, b do buf[j] = { key = "", val = VALUE } end
+  local n = 0
+  for i = ctx.thread, ctx.items - 1, ctx.threads do
+    n = n + 1
+    buf[n].key = key(i)
+    if n == b then kv_mput(buf); n = 0 end
+  end
+  if n > 0 then
+    local last = {}
+    for j = 1, n do last[j] = buf[j] end
+    kv_mput(last)
   end
 end
 
@@ -66,7 +81,7 @@ local function run(ctx)
     -- The returned value is intentionally discarded. This call exists only to time a read.
     kv_get(key(rnd(n)))
   elseif roll <= W_PUT then
-    kv_put(key(rnd(n)), UPDATE_VALUE)
+    kv_put(key(rnd(n)), VALUE)
   elseif roll <= W_DEL then
     kv_del(key(rnd(n)))
   else
