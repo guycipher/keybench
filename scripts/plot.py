@@ -484,8 +484,12 @@ def plot_seed_throughput(rows: list[dict[str, str]], palette: dict[str, str],
             series = seed_series(rows, engine, workload)
             if not series:
                 continue
-            ax.plot([t for t, _ in series], [v for _, v in series], marker="o",
-                    color=engine_color(engine, palette), label=engine)
+            # Markers sit on a fine quarter second sample, so on a long seed they
+            # pile into a band. Thin them to about a dozen and shrink them, keeping
+            # the line continuous, while a short seed still shows every point.
+            mevery = max(1, len(series) // 12)
+            ax.plot([t for t, _ in series], [v for _, v in series], marker="o", markersize=4,
+                    markevery=mevery, color=engine_color(engine, palette), label=engine)
         ax.set_title(workload)
         ax.set_xlabel("elapsed s")
         ax.set_ylabel("keys loaded")
