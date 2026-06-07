@@ -28,11 +28,18 @@ static void build_info(probe_info_cb cb, void *arg)
 {
     cb(arg, "keybench", KEYBENCH_VERSION);
 
-#ifdef __VERSION__
-    cb(arg, "compiler", __VERSION__);
-#elif defined(__clang_version__)
-    cb(arg, "compiler", __clang_version__);
+    /* Name the compiler, not just its version. GCC's __VERSION__ is the bare
+       number with no name, and clang defines __GNUC__ too, so check clang first. */
+    char comp[64];
+#if defined(__clang__)
+    snprintf(comp, sizeof comp, "clang %d.%d.%d", __clang_major__, __clang_minor__,
+             __clang_patchlevel__);
+#elif defined(__GNUC__)
+    snprintf(comp, sizeof comp, "gcc %d.%d.%d", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+#else
+    snprintf(comp, sizeof comp, "unknown");
 #endif
+    cb(arg, "compiler", comp);
 
 #ifdef __STDC_VERSION__
     char std[32];

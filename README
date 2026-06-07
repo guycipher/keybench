@@ -128,7 +128,7 @@ needs no disk. A persistent engine writes to a drive, so name one with
 
   ./keybench --backend rocksdb --data-dir /mnt/disk workloads/mixed.lua
 
-  keybench 0.1.0: 1 workload(s), engine=rocksdb seed=1 repeat=1
+  keybench 0.1.1: 1 workload(s), engine=rocksdb seed=1 repeat=1
     threads: 1
   [probe: system]
     host           agpmastersystem
@@ -142,8 +142,8 @@ needs no disk. A persistent engine writes to a drive, so name one with
     data_disk      solid state
     data_disk_model WDC  WDS500G2B0A
   [probe: build]
-    keybench       0.1.0
-    compiler       12.3.0
+    keybench       0.1.1
+    compiler       gcc 12.3.0
     std            C 201112 (optimized)
     allocator      jemalloc (glibc 2.37)
 
