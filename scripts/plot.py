@@ -216,15 +216,6 @@ def engine_internal_metrics(rows: list[dict[str, str]], engine: str) -> list[str
     return ordered[:MAX_PANELS]
 
 
-def representative_workload(rows: list[dict[str, str]]) -> str:
-    assert isinstance(rows, list), "rows must be a list"
-    present = set(distinct([r[COL_WORKLOAD] for r in rows]))
-    for w in REP_WORKLOAD_PREF:
-        if w in present:
-            return w
-    return next(iter(present), "")
-
-
 def tl_series(rows: list[dict[str, str]], engine: str, workload: str,
               metric: str) -> list[tuple[float, float]]:
     """The run timeline at one operating point, the peak thread cell at the
@@ -504,31 +495,45 @@ def plot_seed_throughput(rows: list[dict[str, str]], palette: dict[str, str],
 
 
 def plot_timeline_system(rows: list[dict[str, str]], palette: dict[str, str],
-                         outdir: Path, ext: str) -> Optional[Path]:
+                         outdir: Path, ext: str) -> list[Path]:
+    """One system usage figure per workload, since the system probe samples are
+    tagged with the workload that was running, so a multi workload run needs a
+    figure each rather than collapsing to one. A panel per metric, a line per
+    engine, like the throughput timeline."""
     assert isinstance(rows, list), "rows must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     if not rows:
-        return None
+        return []
     present = set(distinct([r[COL_METRIC] for r in rows]))
     metrics = [m for m in SYSTEM_ALL if m in present]
     if not metrics:
-        return None
-    workload = representative_workload(rows)
+        return []
     engines = distinct([r[COL_ENGINE] for r in rows])
-    fig, axes = make_grid(len(metrics), f"System usage over time ({workload}, peak threads)")
-    for ax, metric in zip(axes, metrics):
-        scale = BYTES_PER_MIB if metric == DISK_METRIC else 1.0
-        for engine in engines:
-            series = tl_series(rows, engine, workload, metric)
-            if not series:
-                continue
-            ax.plot([t for t, _ in series], [v / scale for _, v in series],
-                    color=engine_color(engine, palette), label=engine)
-        ax.set_title(metric if metric != DISK_METRIC else "disk_mib")
-        ax.set_xlabel("elapsed s")
-        ax.grid(True, alpha=GRID_ALPHA)
-        legend_if_any(ax)
-    return save(fig, outdir, "timeline_system", ext)
+    written: list[Path] = []
+    count = 0
+    for workload in distinct([r[COL_WORKLOAD] for r in rows]):
+        count += 1
+        assert count <= len(rows) + 1, "timeline system loop exceeded its bound"
+        fig, axes = make_grid(len(metrics), f"System usage over time ({workload}, peak threads)")
+        drew = False
+        for ax, metric in zip(axes, metrics):
+            scale = BYTES_PER_MIB if metric == DISK_METRIC else 1.0
+            for engine in engines:
+                series = tl_series(rows, engine, workload, metric)
+                if not series:
+                    continue
+                drew = True
+                ax.plot([t for t, _ in series], [v / scale for _, v in series],
+                        color=engine_color(engine, palette), label=engine)
+            ax.set_title(metric if metric != DISK_METRIC else "disk_mib")
+            ax.set_xlabel("elapsed s")
+            ax.grid(True, alpha=GRID_ALPHA)
+            legend_if_any(ax)
+        if drew:
+            written.append(save(fig, outdir, f"timeline_system_{workload}", ext))
+        else:
+            plt.close(fig)
+    return written
 
 
 def draw_engine_figure(rows: list[dict[str, str]], engine: str, workload: str,
@@ -544,40 +549,47 @@ def draw_engine_figure(rows: list[dict[str, str]], engine: str, workload: str,
     color = engine_color(engine, palette)
     fig, axes = make_grid(len(metrics), f"{engine} internals over time ({workload}, peak threads)")
     idx = 0
+    drew = False
     for ax, metric in zip(axes, metrics):
         idx += 1
         assert idx <= len(metrics) + 1, "panel loop exceeded its bound"
         scale = BYTES_PER_MIB if is_byte_metric(metric) else 1.0
         series = tl_series(rows, engine, workload, metric)
         if series:
+            drew = True
             ax.plot([t for t, _ in series], [v / scale for _, v in series],
                     color=color, label=engine)
         ax.set_title(f"{metric} mib" if is_byte_metric(metric) else metric)
         ax.set_xlabel("elapsed s")
         ax.grid(True, alpha=GRID_ALPHA)
         legend_if_any(ax)
-    return save(fig, outdir, f"engine_stats_{token}", ext)
+    if not drew:
+        plt.close(fig)
+        return None
+    return save(fig, outdir, f"engine_stats_{token}_{workload}", ext)
 
 
 def plot_engine_stats(rows: list[dict[str, str]], palette: dict[str, str],
                       outdir: Path, ext: str) -> list[Path]:
-    """One engine internals figure per engine, since rocksdb and tidesdb report
-    disjoint metric names and so never share a panel. Every engine that emitted
-    samples gets its own complete figure."""
+    """One engine internals figure per engine and workload, since rocksdb and
+    tidesdb report disjoint metric names and so never share a panel, and the system
+    probe tags each sample with the workload that was running, so every workload
+    gets its own figure rather than collapsing to one."""
     assert isinstance(rows, list), "rows must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     if not rows:
         return []
-    workload = representative_workload(rows)
     written: list[Path] = []
     engines = distinct([r[COL_ENGINE] for r in rows])
+    workloads = distinct([r[COL_WORKLOAD] for r in rows])
     count = 0
-    for engine in engines:
-        count += 1
-        assert count <= len(engines) + 1, "engine loop exceeded its bound"
-        path = draw_engine_figure(rows, engine, workload, palette, outdir, ext)
-        if path is not None:
-            written.append(path)
+    for workload in workloads:
+        for engine in engines:
+            count += 1
+            assert count <= len(workloads) * len(engines) + 1, "engine loop exceeded its bound"
+            path = draw_engine_figure(rows, engine, workload, palette, outdir, ext)
+            if path is not None:
+                written.append(path)
     return written
 
 
@@ -616,8 +628,8 @@ def main() -> int:
         plot_scalability(points, palette, outdir, ext),
         plot_timeline(timeline_rows, palette, outdir, ext),
         plot_seed_throughput(timeline_rows, palette, outdir, ext),
-        plot_timeline_system(timeline_rows, palette, outdir, ext),
     ]
+    results.extend(plot_timeline_system(timeline_rows, palette, outdir, ext))
     results.extend(plot_sweeps(points, palette, outdir, ext))
     results.extend(plot_engine_stats(timeline_rows, palette, outdir, ext))
     for pctl in COMPARE_PCTLS:
