@@ -109,7 +109,7 @@ write_buffer_size = 64M
 block_cache_size = 64M
 num_flush_threads = 4
 num_compaction_threads = 4
-# 15 is max, graduated
+# 20 is max, graduated
 l0_queue_stall_threshold = 20
 l1_file_count_trigger = 6
 max_open_sstables = 65536
