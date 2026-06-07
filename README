@@ -8,6 +8,7 @@ engines, times every operation, and reports throughput and latency. The same
 script runs unchanged against every engine, so a comparison measures the
 engines and not the harness.
 
+POSIX only currently.
 
 What it measures
 ================
@@ -120,10 +121,13 @@ The smallest run names one workload file.
 
   ./keybench workloads/mixed.lua
 
-By default this drives 200000 units on one thread against the skiplist and
-prints a console report. The shape of that report.
+That drives 200000 units on one thread against the in memory skiplist, which
+needs no disk. A persistent engine writes to a drive, so name one with
+--data-dir, and the same run against RocksDB on that disk prints this.
 
-  keybench 0.1.0: 1 workload(s), engine=skiplist seed=1 repeat=1
+  ./keybench --backend rocksdb --data-dir /mnt/disk workloads/mixed.lua
+
+  keybench 0.1.0: 1 workload(s), engine=rocksdb seed=1 repeat=1
     threads: 1   batch: 1
   [probe: system]
     host           agpmastersystem
@@ -132,8 +136,8 @@ prints a console report. The shape of that report.
     cpu_cores      16
     ram            46.8 GiB
     page_size      4096
-    data_fs(/tmp)  88.6 GiB free of 296.0 GiB
-    data_dev       /dev/sdb4 on / (ext4)
+    data_fs(/mnt/disk) 76.9 GiB free of 158.9 GiB
+    data_dev       /dev/sdb3 on /mnt/disk (ext4)
     data_disk      solid state
     data_disk_model WDC  WDS500G2B0A
   [probe: build]
@@ -143,16 +147,18 @@ prints a console report. The shape of that report.
     allocator      jemalloc (glibc 2.37)
 
   === mixed ===
-  engine=skiplist  threads=1  batch=1  (median of 1 run)
+  engine=rocksdb 11.1.1  threads=1  batch=1  (median of 1 run)
   op             count        p50        p99      p99.9        max
-  put            60404     462 ns    1.43 us   11.71 us   15.48 us
-  get            99617     474 ns    1.46 us   11.84 us   69.14 us
-  del            19955     470 ns    1.48 us    9.41 us   13.41 us
-  range          20024    2.32 us    8.26 us   15.55 us   26.98 us
+  put            60404    8.64 us   22.91 us   75.26 us  376.62 us
+  get            99617   10.43 us   31.36 us   46.34 us  108.91 us
+  del            19955    4.19 us   15.17 us   29.82 us   47.02 us
+  range          20024  407.55 us  643.07 us  806.91 us    1.04 ms
   get hit rate: 92.2%
-  throughput: 315896 /sec (1 op per unit)
+  throughput: 17819 /sec (1 op per unit)
 
-The system probe records the machine. The build probe records the compiler and
+The system probe records the machine, including the device, filesystem, and
+solid state or rotational nature of the drive behind --data-dir, which is the
+disk the benchmark actually exercises. The build probe records the compiler and
 allocator. The per op table gives the latency distribution. The hit rate is the
 fraction of gets that found a key. The throughput line gives wu/s and, when it
 differs, ops/s.
