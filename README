@@ -509,7 +509,7 @@ that name and labeling the report column with it.
     name  = "mine",
     load  = load,
     run   = run,
-    sweep = { param = "batch", values = { 1, 64, 256, 1024 } },
+    sweep = { param = "batch", values = { 1, 64, 256 } },
   }
 
 The sweep is the workload's own, not a global flag, so only the file that

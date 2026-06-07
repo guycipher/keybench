@@ -93,5 +93,5 @@ return {
   name = "batch",
   load = load,
   run = run,
-  sweep = { param = "batch", values = { 1, 64, 256, 512, 1024 }, seed_per_value = false },
+  sweep = { param = "batch", values = { 1, 64, 256 }, seed_per_value = false },
 }
