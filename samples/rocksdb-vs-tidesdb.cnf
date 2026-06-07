@@ -51,7 +51,7 @@ block_based_table_factory = {block_cache=64M;cache_index_and_filter_blocks=true;
 write_buffer_size = 64M
 max_background_jobs = 8
 level0_slowdown_writes_trigger = 10
-level0_file_num_compaction_trigger = 10
+level0_file_num_compaction_trigger = 6
 
 # Reference, RocksDB column family and write path defaults.
 # write_buffer_size = 64M                  # memtable size before it flushes
