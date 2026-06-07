@@ -259,6 +259,7 @@ Reporters and live timeline
   --report S     a comma list of sinks, each name or name:path.
   --timeline S   sample every S seconds while a run is in flight.
   --report-dir D create D/<timestamp>/ and bundle every artifact there.
+  --auto-plot    after the run, plot the report dir into its own figures/.
 
 The sink names are console, tsv, and timeline. A bare name, or a name whose
 path is a single dash, writes to stdout. A name with a path writes to that
@@ -463,6 +464,11 @@ post. Pass --format pdf or --format svg for a vector copy, say for a paper.
 
   python3 scripts/plot.py results/<timestamp> --out figures
   python3 scripts/plot.py results/<timestamp> --out figures --format pdf
+
+To skip that step, pass --auto-plot to the run, or set auto_plot in the config,
+and keybench plots the report directory into its own figures/ when the run ends.
+It needs --report-dir to have a directory to plot, and is best effort, a missing
+python or matplotlib prints a note rather than failing the run.
 
 The timeline figures are only as detailed as the samples behind them, so a run
 needs a sample interval and enough time per point to fill them. A short fixed

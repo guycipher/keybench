@@ -523,7 +523,8 @@ static void *seed_progress_main(void *arg)
     if (p->sampling) iv = (p->interval > 0.0 && p->interval < 0.25) ? p->interval : 0.25;
     uint64_t iv_ns = (uint64_t)(iv * 1e9);
     if (iv_ns < PROGRESS_STEP_NS) iv_ns = PROGRESS_STEP_NS;
-    uint64_t prev_t = p->t0, prev_keys = 0, last_print = p->t0;
+    uint64_t prev_t = p->t0, prev_keys = 0;
+    uint64_t print_t = p->t0, print_keys = 0;
     long tick = 0;
     while (!p->stop)
     {
@@ -543,13 +544,18 @@ static void *seed_progress_main(void *arg)
         prev_keys = keys;
         prev_t = now;
         /* Throttle the scrolling line to about a second so a fine sample interval
-           does not spam the terminal, while samples still fire every tick. */
-        if (p->show && (now - last_print) >= PROGRESS_TICK_NS - PROGRESS_STEP_NS)
+           does not spam the terminal, while samples still fire every tick. The
+           live rate spans the whole print interval, not the last fine tick, so a
+           bursty stalling load does not flash zero. */
+        if (p->show && (now - print_t) >= PROGRESS_TICK_NS - PROGRESS_STEP_NS)
         {
+            double pdt = (now - print_t) / 1e9;
+            double prate = pdt > 0 ? (double)(keys - print_keys) / pdt : 0.0;
             fprintf(stderr, "  seeding %s %s  %5.1fs  %12llu keys  %10.0f keys/s\n", p->workload,
-                    p->engine, (now - p->t0) / 1e9, (unsigned long long)keys, rate);
+                    p->engine, (now - p->t0) / 1e9, (unsigned long long)keys, prate);
             fflush(stderr);
-            last_print = now;
+            print_keys = keys;
+            print_t = now;
         }
         if (p->sampling)
         {
@@ -1143,7 +1149,7 @@ static void emit_probes(reporter_set *reporters)
  * one self-contained directory. Builds the report spec and replay path into the
  * caller's buffers. Returns 0 on success. */
 static int setup_report_dir(const char *base, char *spec, size_t spec_n, char *replay,
-                            size_t replay_n)
+                            size_t replay_n, char *dir_out, size_t dir_n)
 {
     time_t now = time(NULL);
     struct tm tmv;
@@ -1163,8 +1169,30 @@ static int setup_report_dir(const char *base, char *spec, size_t spec_n, char *r
              "console,console:%s/report.txt,tsv:%s/points.tsv,timeline:%s/timeline.tsv", dir, dir,
              dir);
     snprintf(replay, replay_n, "%s/replay.cnf", dir);
+    if (dir_out) snprintf(dir_out, dir_n, "%s", dir);
     fprintf(stderr, "keybench: writing reports to %s/\n", dir);
     return 0;
+}
+
+/* Run scripts/plot.py over the report directory once the run is done, so an
+   --auto-plot run leaves its figures beside its tsv. The script lives next to the
+   binary, found from argv0, and the call is best effort, a missing python or
+   matplotlib just prints a note rather than failing the run. */
+static void run_plotter(const char *argv0, const char *dir)
+{
+    char plotpath[700];
+    const char *slash = strrchr(argv0, '/');
+    if (slash)
+        snprintf(plotpath, sizeof plotpath, "%.*s/scripts/plot.py", (int)(slash - argv0), argv0);
+    else
+        snprintf(plotpath, sizeof plotpath, "scripts/plot.py");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof cmd, "python3 '%s' '%s' --out '%s/figures'", plotpath, dir, dir);
+    fprintf(stderr, "keybench: plotting into %s/figures\n", dir);
+    int rc = system(cmd);
+    if (rc != 0)
+        fprintf(stderr, "keybench: plot step failed, is python3 with matplotlib installed?\n");
 }
 
 static void usage(const char *p)
@@ -1182,6 +1210,7 @@ static void usage(const char *p)
         "console,timeline:tl.tsv\n"
         "  --report-dir D  create D/<timestamp>/ and write report.txt, points.tsv, timeline.tsv, "
         "replay.cnf there\n"
+        "  --auto-plot  after the run, plot the report dir into its figures/ (needs --report-dir)\n"
         "  --timeline S sample interval (s) for real-time stats; needs a timeline reporter\n"
         "  --probe L    system probes to run (default all; 'none' to disable); e.g. system\n"
         "  --data-dir D directory persistent engines store data under, required for rocksdb "
@@ -1212,6 +1241,7 @@ int main(int argc, char **argv)
     const char *threads_arg = NULL, *report_arg = NULL, *save_arg = NULL;
     const char *probe_arg = NULL, *report_dir_arg = NULL;
     int repeat = 1;
+    int auto_plot = 0;
 
     cfg_file *conf = NULL;
     const char *cfiles[64];
@@ -1251,6 +1281,8 @@ int main(int argc, char **argv)
             report_arg = argv[++i];
         else if (!strcmp(argv[i], "--report-dir") && i + 1 < argc)
             report_dir_arg = argv[++i];
+        else if (!strcmp(argv[i], "--auto-plot"))
+            auto_plot = 1;
         else if (!strcmp(argv[i], "--timeline") && i + 1 < argc)
             cfg.timeline = arg_double("--timeline", argv[++i]);
         else if (!strcmp(argv[i], "--probe") && i + 1 < argc)
@@ -1355,13 +1387,15 @@ int main(int argc, char **argv)
     }
     if (repeat < 1) repeat = 1;
 
-    char rd_spec[2400], rd_replay[700];
+    if (conf) auto_plot = auto_plot || (int)kv_opt_int(cfg_section(conf, "bench"), "auto_plot", 0);
+
+    char rd_spec[2400], rd_replay[700], rd_dir[600] = "";
     if (!report_dir_arg && conf)
         report_dir_arg = kv_opt_str(cfg_section(conf, "bench"), "report_dir", NULL);
     if (report_dir_arg)
     {
-        if (setup_report_dir(report_dir_arg, rd_spec, sizeof rd_spec, rd_replay,
-                             sizeof rd_replay) != 0)
+        if (setup_report_dir(report_dir_arg, rd_spec, sizeof rd_spec, rd_replay, sizeof rd_replay,
+                             rd_dir, sizeof rd_dir) != 0)
         {
             cfg_free(conf);
             return 2;
@@ -1418,6 +1452,15 @@ int main(int argc, char **argv)
         run_file(wl[i], &cfg, engines, neng, tlist, ntp, repeat, &reporters);
 
     reporters_close(&reporters);
+
+    if (auto_plot)
+    {
+        if (rd_dir[0])
+            run_plotter(argv[0], rd_dir);
+        else
+            fprintf(stderr, "keybench: --auto-plot needs --report-dir, nothing to plot\n");
+    }
+
     cfg_free(conf);
     return 0;
 }

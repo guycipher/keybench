@@ -10,6 +10,11 @@
 [bench]
 backend  = rocksdb,tidesdb
 threads  = 1,8,16,32
+# Seed every cell with this many threads regardless of its run thread count, so
+# the low thread cells do not seed single threaded. Helps on an SSD, where
+# parallel writes are faster, and shortens the grid since seeding is most of the
+# per cell time. On a spinning disk leave it at 0 to seed at the run thread count.
+seed_threads = 8
 repeat   = 2
 secs     = 60
 # items and users size the on disk dataset, about 2 GB per workload here, 16
@@ -21,8 +26,11 @@ secs     = 60
 items    = 500000
 users    = 90000
 report_dir = ./results
+# Plot the report directory into its figures/ when the run finishes. Needs
+# python3 with matplotlib, and is best effort, a missing one just prints a note.
+auto_plot = 1
 timeline = 1
-data_dir = /media/agpmastersystem/0e938ae2-7b41-437b-a5ac-a27e9f111a4e/bench
+data_dir = /media/agpmastersystem/c794105c-0cd9-4be9-8369-ee6d6e707d68/home/bench/keybench
 workload = workloads/mixed.lua
 workload = workloads/cart.lua
 workload = workloads/scan.lua
