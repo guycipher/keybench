@@ -53,6 +53,9 @@ typedef struct
     int threads;
     const char *sweep_param;
     long sweep_value;
+    /* "seed" while the untimed load fills the store, "run" during the measured
+       phase, so the two timelines stay separable. */
+    const char *phase;
     double elapsed_s;
     const sample_metric *m;
     int nm;

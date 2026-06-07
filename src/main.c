@@ -108,6 +108,10 @@ typedef struct
     long items;
     unsigned seed;
     int threads;
+    /* Threads that seed the dataset, independent of the run thread count. 0 means
+       use the run threads, the default, so a low thread run cell does not seed
+       single threaded unless you want it to. */
+    int seed_threads;
     /* A workload may sweep a parameter of its own. sweep_param names it and
        sweep_value is the current point, set per cell by run_file. NULL means the
        workload sweeps nothing. */
@@ -364,6 +368,7 @@ static void *sampler_main(void *arg)
                             sp->threads,
                             sp->sweep_param,
                             sp->sweep_value,
+                            "run",
                             (double)(nowt - sp->t0) / 1e9,
                             m,
                             nm};
@@ -495,20 +500,36 @@ typedef struct
     uint64_t t0;
     volatile int stop;
     const char *workload, *engine;
+    int show, sampling;
+    double interval;
+    kv_store *store;
+    reporter_set *reporters;
+    const char *sweep_param;
+    long sweep_value;
+    int run_threads;
 } seed_progress;
 
-/* Stream the seed phase to stderr like the run phase, so a long load shows keys
-   written and the rate instead of looking hung. One line per tick, scrolling. */
+/* Watch the seed phase once a tick. When stderr is a terminal it streams a status
+   line, keys written and the rate, so a long load looks alive. When a timeline
+   reporter is active it also emits a sample tagged phase seed, the ingest rate
+   plus the engine internals as the load lands, so the seed plots over time like
+   the run does. */
 static void *seed_progress_main(void *arg)
 {
     seed_progress *p = arg;
-    uint64_t prev_t = p->t0, prev_keys = 0;
+    /* Sample the seed finely, much finer than the run timeline, so even a short
+       load draws a smooth curve. The live line is throttled to a second below. */
+    double iv = 1.0;
+    if (p->sampling) iv = (p->interval > 0.0 && p->interval < 0.25) ? p->interval : 0.25;
+    uint64_t iv_ns = (uint64_t)(iv * 1e9);
+    if (iv_ns < PROGRESS_STEP_NS) iv_ns = PROGRESS_STEP_NS;
+    uint64_t prev_t = p->t0, prev_keys = 0, last_print = p->t0;
     long tick = 0;
     while (!p->stop)
     {
         /* Absolute tick boundary so the labels do not drift later over a long
            seed as the per tick overshoots add up. */
-        uint64_t until = p->t0 + (uint64_t)(++tick) * PROGRESS_TICK_NS;
+        uint64_t until = p->t0 + (uint64_t)(++tick) * iv_ns;
         while (!p->stop && now_ns() < until)
         {
             struct timespec ts = {0, PROGRESS_STEP_NS};
@@ -521,9 +542,31 @@ static void *seed_progress_main(void *arg)
         double rate = dt > 0 ? (double)(keys - prev_keys) / dt : 0.0;
         prev_keys = keys;
         prev_t = now;
-        fprintf(stderr, "  seeding %s %s  %5.1fs  %12llu keys  %10.0f keys/s\n", p->workload,
-                p->engine, (now - p->t0) / 1e9, (unsigned long long)keys, rate);
-        fflush(stderr);
+        /* Throttle the scrolling line to about a second so a fine sample interval
+           does not spam the terminal, while samples still fire every tick. */
+        if (p->show && (now - last_print) >= PROGRESS_TICK_NS - PROGRESS_STEP_NS)
+        {
+            fprintf(stderr, "  seeding %s %s  %5.1fs  %12llu keys  %10.0f keys/s\n", p->workload,
+                    p->engine, (now - p->t0) / 1e9, (unsigned long long)keys, rate);
+            fflush(stderr);
+            last_print = now;
+        }
+        if (p->sampling)
+        {
+            /* Lean sample, just the ingest, kept cheap so a fine interval adds no
+               weight to the load. The cumulative count drives the seed figure. */
+            sample_metric m[2] = {{"keys_per_s", rate}, {"seed_keys", (double)keys}};
+            report_sample rs = {p->workload,
+                                p->engine,
+                                p->run_threads,
+                                p->sweep_param,
+                                p->sweep_value,
+                                "seed",
+                                (double)(now - p->t0) / 1e9,
+                                m,
+                                2};
+            reporters_sample(p->reporters, &rs);
+        }
     }
     return NULL;
 }
@@ -574,50 +617,67 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
     if (has_load)
     {
         int show = isatty(STDERR_FILENO);
+        int sampling = cfg->timeline > 0 && reporters && reporters_want_samples(reporters);
+        int seed_nthreads = cfg->seed_threads > 0 ? cfg->seed_threads : nthreads;
         uint64_t ls = now_ns();
         if (show)
-            fprintf(stderr, "  seeding %s on %s with %d threads\n", name, R->engine, nthreads);
-        load_worker *lw = calloc((size_t)nthreads, sizeof *lw);
-        pthread_t *ltids = calloc((size_t)nthreads, sizeof *ltids);
+            fprintf(stderr, "  seeding %s on %s with %d threads\n", name, R->engine, seed_nthreads);
+        load_worker *lw = calloc((size_t)seed_nthreads, sizeof *lw);
+        pthread_t *ltids = calloc((size_t)seed_nthreads, sizeof *ltids);
         if (!lw || !ltids)
         {
             fprintf(stderr, "keybench: out of memory\n");
             abort();
         }
-        for (int t = 0; t < nthreads; t++)
+        for (int t = 0; t < seed_nthreads; t++)
         {
             lw[t].path = path;
             lw[t].cfg = cfg;
             lw[t].store = store;
             lw[t].tid = t;
-            lw[t].nthreads = nthreads;
+            lw[t].nthreads = seed_nthreads;
         }
-        for (int t = 0; t < nthreads; t++)
+        for (int t = 0; t < seed_nthreads; t++)
             pthread_create(&ltids[t], NULL, load_worker_main, &lw[t]);
 
         seed_progress spg;
         pthread_t spgtid;
-        if (show)
+        if (show || sampling)
         {
             spg = (seed_progress){.lw = lw,
-                                  .nthreads = nthreads,
+                                  .nthreads = seed_nthreads,
                                   .t0 = ls,
                                   .stop = 0,
                                   .workload = name,
-                                  .engine = R->engine};
+                                  .engine = R->engine,
+                                  .show = show,
+                                  .sampling = sampling,
+                                  .interval = cfg->timeline,
+                                  .store = store,
+                                  .reporters = reporters,
+                                  .sweep_param = cfg->sweep_param,
+                                  .sweep_value = cfg->sweep_value,
+                                  .run_threads = nthreads};
             pthread_create(&spgtid, NULL, seed_progress_main, &spg);
         }
         int lerr = 0;
-        for (int t = 0; t < nthreads; t++)
+        uint64_t seeded = 0;
+        for (int t = 0; t < seed_nthreads; t++)
         {
             pthread_join(ltids[t], NULL);
+            seeded += KV_RELAXED_GET(lw[t].kc.stats.prim_ops);
             if (lw[t].err) lerr = 1;
         }
-        if (show)
+        if (show || sampling)
         {
             spg.stop = 1;
             pthread_join(spgtid, NULL);
-            fprintf(stderr, "  seeded %s in %.1fs\n", name, (now_ns() - ls) / 1e9);
+        }
+        if (show)
+        {
+            double secs = (now_ns() - ls) / 1e9;
+            fprintf(stderr, "  seeded %s in %.1fs  %llu keys  %.0f keys/s\n", name, secs,
+                    (unsigned long long)seeded, secs > 0 ? seeded / secs : 0.0);
         }
         free(lw);
         free(ltids);
@@ -982,6 +1042,7 @@ static void apply_config(const cfg_file *conf, config *cfg, const char **threads
     cfg->users = kv_opt_int(b, "users", cfg->users);
     cfg->items = kv_opt_int(b, "items", cfg->items);
     cfg->seed = (unsigned)kv_opt_int(b, "seed", cfg->seed);
+    cfg->seed_threads = (int)kv_opt_int(b, "seed_threads", cfg->seed_threads);
     *repeat = (int)kv_opt_int(b, "repeat", *repeat);
     *ncfiles = kv_opt_all(b, "workload", cfiles, maxfiles);
 }
@@ -1002,6 +1063,7 @@ static void save_config(const char *path, const config *cfg, const char *engines
     fprintf(f, "[bench]\n");
     fprintf(f, "backend = %s\n", engines_str);
     fprintf(f, "threads = %s\n", threads_list);
+    if (cfg->seed_threads > 0) fprintf(f, "seed_threads = %d\n", cfg->seed_threads);
     if (cfg->secs > 0)
         fprintf(f, "secs = %g\n", cfg->secs);
     else
@@ -1114,6 +1176,7 @@ static void usage(const char *p)
         "(default 200000)\n"
         "  --secs S     run each workload for S seconds instead of a fixed count\n"
         "  --threads L  worker-thread counts; a comma list sweeps (e.g. 1,2,4,8) (default 1)\n"
+        "  --seed-threads N  threads used to seed the dataset (default 0, meaning use --threads)\n"
         "  --repeat N   run each point N times and report the median (default 1)\n"
         "  --report S   reporters, comma list of name[:path] (console, tsv, timeline); e.g. "
         "console,timeline:tl.tsv\n"
@@ -1180,6 +1243,8 @@ int main(int argc, char **argv)
             cfg.secs = arg_double("--secs", argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc)
             threads_arg = argv[++i];
+        else if (!strcmp(argv[i], "--seed-threads") && i + 1 < argc)
+            cfg.seed_threads = (int)arg_long("--seed-threads", argv[++i]);
         else if (!strcmp(argv[i], "--repeat") && i + 1 < argc)
             repeat = (int)arg_long("--repeat", argv[++i]);
         else if (!strcmp(argv[i], "--report") && i + 1 < argc)

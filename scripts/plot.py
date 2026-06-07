@@ -29,6 +29,7 @@ COL_ENGINE = "engine"
 COL_THREADS = "threads"
 COL_SWEEP_PARAM = "sweep_param"
 COL_SWEEP_VALUE = "sweep_value"
+COL_PHASE = "phase"
 COL_OP = "op"
 COL_ELAPSED = "elapsed_s"
 COL_METRIC = "metric"
@@ -42,6 +43,7 @@ COMPARE_PCTLS = ("p50", "p99")
 PALETTE_FILE = "BACKENDPALETTE"
 
 THROUGHPUT_METRIC = "wu_per_s"
+SEED_METRIC = "seed_keys"
 THROUGHPUT_ALL = ("wu_per_s", "ops_per_s")
 SYSTEM_ALL = (
     "cpu_util_pct", "proc_cpu_pct", "mem_avail_mb", "load1", "rss_mb", "peak_rss_mb",
@@ -225,18 +227,48 @@ def representative_workload(rows: list[dict[str, str]]) -> str:
 
 def tl_series(rows: list[dict[str, str]], engine: str, workload: str,
               metric: str) -> list[tuple[float, float]]:
+    """The run timeline at one operating point, the peak thread cell at the
+    baseline swept value, so a swept workload does not blur several runs of very
+    different rates into one jagged average."""
     assert isinstance(metric, str), "metric must be a string"
     assert isinstance(engine, str), "engine must be a string"
     picked = [r for r in rows if r[COL_ENGINE] == engine and r[COL_WORKLOAD] == workload
-              and r[COL_METRIC] == metric]
+              and r[COL_METRIC] == metric and r.get(COL_PHASE, "run") == "run"]
     if not picked:
         return []
     threads = max(to_int(r[COL_THREADS]) for r in picked)
+    sweep = min(to_int(r[COL_SWEEP_VALUE]) for r in picked)
+    picked = [r for r in picked if to_int(r[COL_THREADS]) == threads
+              and to_int(r[COL_SWEEP_VALUE]) == sweep]
     buckets: dict[float, list[float]] = {}
     for r in picked:
-        if to_int(r[COL_THREADS]) != threads:
-            continue
-        buckets.setdefault(to_float(r[COL_ELAPSED]), []).append(to_float(r[COL_VALUE]))
+        buckets.setdefault(round(to_float(r[COL_ELAPSED]), 1), []).append(to_float(r[COL_VALUE]))
+    return [(t, sum(v) / len(v)) for t, v in sorted(buckets.items())]
+
+
+def seed_series(rows: list[dict[str, str]], engine: str,
+                workload: str) -> list[tuple[float, float]]:
+    """The ingest curve for the single richest seed, the one cell with the most
+    samples, its slowest or largest. Only one cell is shown rather than several
+    blended, since across a sweep the cells may load different sized data, a 256
+    byte value and a one megabyte value, and averaging those seeds would be
+    meaningless. Repeats of that one cell are averaged by rounded elapsed."""
+    assert isinstance(engine, str), "engine must be a string"
+    assert isinstance(workload, str), "workload must be a string"
+    picked = [r for r in rows if r[COL_ENGINE] == engine and r[COL_WORKLOAD] == workload
+              and r[COL_METRIC] == SEED_METRIC and r.get(COL_PHASE, "run") == "seed"]
+    if not picked:
+        return []
+    counts: dict[tuple[int, int], int] = {}
+    for r in picked:
+        k = (to_int(r[COL_THREADS]), to_int(r[COL_SWEEP_VALUE]))
+        counts[k] = counts.get(k, 0) + 1
+    best = max(counts, key=lambda k: counts[k])
+    picked = [r for r in picked
+              if (to_int(r[COL_THREADS]), to_int(r[COL_SWEEP_VALUE])) == best]
+    buckets: dict[float, list[float]] = {}
+    for r in picked:
+        buckets.setdefault(round(to_float(r[COL_ELAPSED]), 1), []).append(to_float(r[COL_VALUE]))
     return [(t, sum(v) / len(v)) for t, v in sorted(buckets.items())]
 
 
@@ -265,6 +297,27 @@ def save(fig: object, outdir: Path, stem: str, ext: str) -> Path:
     return path
 
 
+def label_xticks(ax: object, values: list[int]) -> None:
+    """Mark the x axis at exactly the values the run used, the thread counts or
+    swept sizes, so the axis reads 1 8 16 plainly instead of whatever ticks a log
+    scale would invent."""
+    assert isinstance(values, list), "values must be a list"
+    vals = sorted({int(v) for v in values})
+    if not vals:
+        return
+    ax.set_xticks(vals)
+    ax.set_xticklabels([str(v) for v in vals])
+    ax.minorticks_off()
+
+
+def legend_if_any(ax: object) -> None:
+    """Add a legend only when the panel drew something labeled, so an empty panel
+    does not warn about having no artists to put in a legend."""
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=LEGEND_FONTSIZE)
+
+
 def plot_throughput_compare(points: list[Point], palette: dict[str, str],
                             outdir: Path, ext: str) -> Optional[Path]:
     assert isinstance(points, list), "points must be a list"
@@ -287,7 +340,7 @@ def plot_throughput_compare(points: list[Point], palette: dict[str, str],
     ax.set_ylabel("wu per s")
     ax.set_title(f"Throughput by workload at {top} threads")
     ax.grid(True, axis="y", alpha=GRID_ALPHA)
-    ax.legend(fontsize=LEGEND_FONTSIZE)
+    legend_if_any(ax)
     return save(fig, outdir, "throughput_compare", ext)
 
 
@@ -307,49 +360,55 @@ def plot_scalability(points: list[Point], palette: dict[str, str], outdir: Path,
             ax.plot([t for t, _ in series], [v for _, v in series], marker="o",
                     color=engine_color(engine, palette), label=engine)
         ax.set_title(workload)
+        ax.set_xscale("log", base=2)
+        label_xticks(ax, [p.threads for p in usable if p.workload == workload])
         ax.set_xlabel("threads")
         ax.set_ylabel("wu per s")
         ax.grid(True, alpha=GRID_ALPHA)
-        ax.legend(fontsize=LEGEND_FONTSIZE)
+        legend_if_any(ax)
     return save(fig, outdir, "scalability", ext)
 
 
-def draw_op_compare(ax: object, points: list[Point], workload: str, ops: list[str],
-                    engines: list[str], pctl: str, palette: dict[str, str]) -> None:
-    assert isinstance(ops, list), "ops must be a list"
-    assert isinstance(engines, list), "engines must be a list"
-    if not ops:
-        return
-    width = 1.0 / (len(engines) + 1)
-    for idx, engine in enumerate(engines):
-        pt = next((p for p in points if p.workload == workload and p.engine == engine), None)
-        ys = [(pt.ops[op][pctl] / NS_PER_US if pt and op in pt.ops else 0.0) for op in ops]
-        xs = [j + idx * width for j in range(len(ops))]
-        ax.bar(xs, ys, width=width, color=engine_color(engine, palette), label=engine)
-    ax.set_xticks([j + width * (len(engines) - 1) / 2 for j in range(len(ops))])
-    ax.set_xticklabels(ops)
-    ax.set_ylabel(f"{pctl} us")
-    ax.grid(True, axis="y", alpha=GRID_ALPHA)
-    ax.legend(fontsize=LEGEND_FONTSIZE)
-
-
-def plot_latency_compare(points: list[Point], pctl: str, palette: dict[str, str],
-                         outdir: Path, ext: str) -> Optional[Path]:
+def plot_latency_threads(points: list[Point], pctl: str, palette: dict[str, str],
+                         outdir: Path, ext: str) -> list[Path]:
+    """Latency against thread count, the latency analogue of the scalability
+    figure. One figure per workload, a panel per op, x is threads, a line per
+    engine, so tail latency under load reads the same way as throughput vs
+    threads and is shown across the whole sweep rather than at one fixed point."""
     assert isinstance(points, list), "points must be a list"
     assert isinstance(pctl, str), "pctl must be a string"
-    top = peak_threads(points)
-    chosen = [p for p in points
-              if p.threads == top and p.sweep_value == baseline_value(points, p.workload)]
-    workloads = distinct([p.workload for p in chosen])
-    engines = engines_of(chosen)
-    if not workloads or not engines:
-        return None
-    fig, axes = make_grid(len(workloads), f"{pctl} latency by op at {top} threads")
-    for ax, workload in zip(axes, workloads):
-        ops = sorted({op for p in chosen if p.workload == workload for op in p.ops})
-        draw_op_compare(ax, chosen, workload, ops, engines, pctl, palette)
-        ax.set_title(workload)
-    return save(fig, outdir, f"latency_{pctl.replace('.', '')}_compare", ext)
+    written: list[Path] = []
+    count = 0
+    for workload in distinct([p.workload for p in points]):
+        count += 1
+        assert count <= len(points) + 1, "latency threads loop exceeded its bound"
+        wpoints = [p for p in points if p.workload == workload
+                   and p.sweep_value == baseline_value(points, workload)]
+        threadset = sorted({p.threads for p in wpoints})
+        if len(threadset) < 2:
+            continue
+        ops = sorted({op for p in wpoints for op in p.ops})
+        engines = engines_of(wpoints)
+        if not ops or not engines:
+            continue
+        fig, axes = make_grid(len(ops), f"{workload}: {pctl} latency vs threads")
+        for ax, op in zip(axes, ops):
+            for engine in engines:
+                series = sorted((p.threads, p.ops[op][pctl] / NS_PER_US) for p in wpoints
+                                if p.engine == engine and op in p.ops)
+                if not series:
+                    continue
+                ax.plot([t for t, _ in series], [v for _, v in series], marker="o",
+                        color=engine_color(engine, palette), label=engine)
+            ax.set_xscale("log", base=2)
+            label_xticks(ax, threadset)
+            ax.set_title(op)
+            ax.set_xlabel("threads")
+            ax.set_ylabel(f"{pctl} us")
+            ax.grid(True, alpha=GRID_ALPHA)
+            legend_if_any(ax)
+        written.append(save(fig, outdir, f"latency_{pctl.replace('.', '')}_threads_{workload}", ext))
+    return written
 
 
 def plot_sweeps(points: list[Point], palette: dict[str, str], outdir: Path,
@@ -380,11 +439,12 @@ def plot_sweeps(points: list[Point], palette: dict[str, str], outdir: Path,
                 ax.plot([b for b, _ in series], [v for _, v in series], marker="o",
                         color=engine_color(engine, palette), label=engine)
             ax.set_xscale("log", base=2)
+            label_xticks(ax, [p.sweep_value for p in wpoints])
             ax.set_title(f"{thr} threads")
             ax.set_xlabel(param)
             ax.set_ylabel("ops per s")
             ax.grid(True, alpha=GRID_ALPHA)
-            ax.legend(fontsize=LEGEND_FONTSIZE)
+            legend_if_any(ax)
         written.append(save(fig, outdir, f"sweep_{workload}", ext))
     return written
 
@@ -409,8 +469,38 @@ def plot_timeline(rows: list[dict[str, str]], palette: dict[str, str],
         ax.set_xlabel("elapsed s")
         ax.set_ylabel("wu per s")
         ax.grid(True, alpha=GRID_ALPHA)
-        ax.legend(fontsize=LEGEND_FONTSIZE)
+        legend_if_any(ax)
     return save(fig, outdir, "timeline_throughput", ext)
+
+
+def plot_seed_throughput(rows: list[dict[str, str]], palette: dict[str, str],
+                         outdir: Path, ext: str) -> Optional[Path]:
+    """How the load fills the store over time, the cumulative keys seeded against
+    elapsed seconds, one panel per workload and a line per engine. A steeper line
+    is a faster ingest and the line simply ends when the seed is done, so a fast
+    engine rises sharply and stops early. Cumulative rather than instantaneous
+    rate so the curve is monotonic and readable instead of a noisy saw."""
+    assert isinstance(rows, list), "rows must be a list"
+    assert isinstance(outdir, Path), "outdir must be a Path"
+    seed_rows = [r for r in rows if r.get(COL_PHASE, "run") == "seed"]
+    if not seed_rows or SEED_METRIC not in set(distinct([r[COL_METRIC] for r in seed_rows])):
+        return None
+    workloads = distinct([r[COL_WORKLOAD] for r in seed_rows])
+    engines = distinct([r[COL_ENGINE] for r in seed_rows])
+    fig, axes = make_grid(len(workloads), "Seed progress, keys loaded over time")
+    for ax, workload in zip(axes, workloads):
+        for engine in engines:
+            series = seed_series(rows, engine, workload)
+            if not series:
+                continue
+            ax.plot([t for t, _ in series], [v for _, v in series], marker="o",
+                    color=engine_color(engine, palette), label=engine)
+        ax.set_title(workload)
+        ax.set_xlabel("elapsed s")
+        ax.set_ylabel("keys loaded")
+        ax.grid(True, alpha=GRID_ALPHA)
+        legend_if_any(ax)
+    return save(fig, outdir, "seed_progress", ext)
 
 
 def plot_timeline_system(rows: list[dict[str, str]], palette: dict[str, str],
@@ -437,7 +527,7 @@ def plot_timeline_system(rows: list[dict[str, str]], palette: dict[str, str],
         ax.set_title(metric if metric != DISK_METRIC else "disk_mib")
         ax.set_xlabel("elapsed s")
         ax.grid(True, alpha=GRID_ALPHA)
-        ax.legend(fontsize=LEGEND_FONTSIZE)
+        legend_if_any(ax)
     return save(fig, outdir, "timeline_system", ext)
 
 
@@ -465,7 +555,7 @@ def draw_engine_figure(rows: list[dict[str, str]], engine: str, workload: str,
         ax.set_title(f"{metric} mib" if is_byte_metric(metric) else metric)
         ax.set_xlabel("elapsed s")
         ax.grid(True, alpha=GRID_ALPHA)
-        ax.legend(fontsize=LEGEND_FONTSIZE)
+        legend_if_any(ax)
     return save(fig, outdir, f"engine_stats_{token}", ext)
 
 
@@ -525,12 +615,13 @@ def main() -> int:
         plot_throughput_compare(points, palette, outdir, ext),
         plot_scalability(points, palette, outdir, ext),
         plot_timeline(timeline_rows, palette, outdir, ext),
+        plot_seed_throughput(timeline_rows, palette, outdir, ext),
         plot_timeline_system(timeline_rows, palette, outdir, ext),
     ]
     results.extend(plot_sweeps(points, palette, outdir, ext))
     results.extend(plot_engine_stats(timeline_rows, palette, outdir, ext))
     for pctl in COMPARE_PCTLS:
-        results.append(plot_latency_compare(points, pctl, palette, outdir, ext))
+        results.extend(plot_latency_threads(points, pctl, palette, outdir, ext))
     for result in results:
         if result is not None:
             print(f"wrote {result}")

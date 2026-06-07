@@ -110,13 +110,15 @@ static void timeline_sample(reporter *r, const report_sample *s)
     if (!t->header_done)
     {
         fprintf(r->out,
-                "workload\tengine\tthreads\tsweep_param\tsweep_value\telapsed_s\tmetric\tvalue\n");
+                "workload\tengine\tthreads\tsweep_param\tsweep_value\tphase\telapsed_s"
+                "\tmetric\tvalue\n");
         t->header_done = 1;
     }
     for (int i = 0; i < s->nm; i++)
-        fprintf(r->out, "%s\t%s\t%d\t%s\t%ld\t%.3f\t%s\t%.3f\n", s->workload, s->engine, s->threads,
-                s->sweep_param ? s->sweep_param : "", s->sweep_param ? s->sweep_value : 1,
-                s->elapsed_s, s->m[i].name, s->m[i].value);
+        fprintf(r->out, "%s\t%s\t%d\t%s\t%ld\t%s\t%.3f\t%s\t%.3f\n", s->workload, s->engine,
+                s->threads, s->sweep_param ? s->sweep_param : "",
+                s->sweep_param ? s->sweep_value : 1, s->phase ? s->phase : "run", s->elapsed_s,
+                s->m[i].name, s->m[i].value);
     fflush(r->out);
 }
 

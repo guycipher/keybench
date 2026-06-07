@@ -102,5 +102,5 @@ return {
   name = "valsize",
   load = load,
   run = run,
-  sweep = { param = "valuebytes", values = { 256, 4096, 65536, 262144, 1048576 } },
+  sweep = { param = "valuebytes", values = { 256, 4096, 65536, 262144 } },
 }
