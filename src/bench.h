@@ -17,6 +17,13 @@ static inline int kv_keycmp(const char *a, size_t alen, const char *b, size_t bl
 #define KV_RELAXED_SET(x, v) __atomic_store_n(&(x), (v), __ATOMIC_RELAXED)
 #define KV_RELAXED_GET(x)    __atomic_load_n(&(x), __ATOMIC_RELAXED)
 
+/* A write op (put, putbatch, del, delbatch) returns this to tell the store it hit
+   transient backpressure and should be waited out and retried rather than having
+   the write dropped. It is distinct from every success and from the plain failure
+   code, so the store can tell a retry from a fatal error. Any backend may return
+   it, whichever way its engine signals a stall. */
+#define KV_RETRY (-2)
+
 typedef int (*kv_range_cb)(void *arg, const char *k, size_t klen, const char *v, size_t vlen);
 
 typedef void (*kv_stat_cb)(void *arg, const char *name, double value);

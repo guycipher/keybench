@@ -135,17 +135,31 @@ static void tdb_apply_cf_config(tidesdb_column_family_config_t *cf, const kv_opt
     cf->use_btree = (int)kv_opt_int(o, "use_btree", cf->use_btree);
 }
 
+/* TDB_ERR_BUSY is transient backpressure and TDB_ERR_LOCKED is transient lock
+   contention under concurrent writers, both worth waiting out. The write ops
+   surface them as KV_RETRY so the store waits and retries rather than dropping the
+   write. Every other non success code is a real failure. */
+static int tdb_retryable(int rc)
+{
+    return rc == TDB_ERR_BUSY || rc == TDB_ERR_LOCKED;
+}
+
 static int tdb_put(void *ctx, const char *k, size_t klen, const char *v, size_t vlen)
 {
     tdb *t = ctx;
     tidesdb_txn_t *txn = NULL;
-    if (tidesdb_txn_begin(t->db, &txn) != TDB_SUCCESS) return -1;
-    int rc =
-        tidesdb_txn_put(txn, t->cf, (const uint8_t *)k, klen, (const uint8_t *)v, vlen, TDB_NO_TTL);
-    if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
-    tidesdb_txn_free(txn);
-    if (rc != TDB_SUCCESS) fprintf(stderr, "tidesdb put failed (%d)\n", rc);
-    return rc == TDB_SUCCESS ? 0 : -1;
+    int rc = tidesdb_txn_begin(t->db, &txn);
+    if (rc == TDB_SUCCESS)
+    {
+        rc = tidesdb_txn_put(txn, t->cf, (const uint8_t *)k, klen, (const uint8_t *)v, vlen,
+                             TDB_NO_TTL);
+        if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
+        tidesdb_txn_free(txn);
+    }
+    if (rc == TDB_SUCCESS) return 0;
+    if (tdb_retryable(rc)) return KV_RETRY;
+    fprintf(stderr, "tidesdb put failed (%d)\n", rc);
+    return -1;
 }
 
 static int tdb_putbatch(void *ctx, const char *const *keys, const size_t *klens,
@@ -153,35 +167,37 @@ static int tdb_putbatch(void *ctx, const char *const *keys, const size_t *klens,
 {
     tdb *t = ctx;
     tidesdb_txn_t *txn = NULL;
-    if (tidesdb_txn_begin(t->db, &txn) != TDB_SUCCESS) return -1;
-    int rc = TDB_SUCCESS;
-    for (int i = 0; i < n; i++)
+    int rc = tidesdb_txn_begin(t->db, &txn);
+    if (rc == TDB_SUCCESS)
     {
-        rc = tidesdb_txn_put(txn, t->cf, (const uint8_t *)keys[i], klens[i],
-                             (const uint8_t *)vals[i], vlens[i], TDB_NO_TTL);
-        if (rc != TDB_SUCCESS) break;
+        for (int i = 0; i < n && rc == TDB_SUCCESS; i++)
+            rc = tidesdb_txn_put(txn, t->cf, (const uint8_t *)keys[i], klens[i],
+                                 (const uint8_t *)vals[i], vlens[i], TDB_NO_TTL);
+        if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
+        tidesdb_txn_free(txn);
     }
-    if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
-    tidesdb_txn_free(txn);
-    if (rc != TDB_SUCCESS) fprintf(stderr, "tidesdb putbatch failed (%d)\n", rc);
-    return rc == TDB_SUCCESS ? 0 : -1;
+    if (rc == TDB_SUCCESS) return 0;
+    if (tdb_retryable(rc)) return KV_RETRY;
+    fprintf(stderr, "tidesdb putbatch failed (%d)\n", rc);
+    return -1;
 }
 
 static int tdb_delbatch(void *ctx, const char *const *keys, const size_t *klens, int n)
 {
     tdb *t = ctx;
     tidesdb_txn_t *txn = NULL;
-    if (tidesdb_txn_begin(t->db, &txn) != TDB_SUCCESS) return -1;
-    int rc = TDB_SUCCESS;
-    for (int i = 0; i < n; i++)
+    int rc = tidesdb_txn_begin(t->db, &txn);
+    if (rc == TDB_SUCCESS)
     {
-        rc = tidesdb_txn_delete(txn, t->cf, (const uint8_t *)keys[i], klens[i]);
-        if (rc != TDB_SUCCESS) break;
+        for (int i = 0; i < n && rc == TDB_SUCCESS; i++)
+            rc = tidesdb_txn_delete(txn, t->cf, (const uint8_t *)keys[i], klens[i]);
+        if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
+        tidesdb_txn_free(txn);
     }
-    if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
-    tidesdb_txn_free(txn);
-    if (rc != TDB_SUCCESS) fprintf(stderr, "tidesdb delbatch failed (%d)\n", rc);
-    return rc == TDB_SUCCESS ? 0 : -1;
+    if (rc == TDB_SUCCESS) return 0;
+    if (tdb_retryable(rc)) return KV_RETRY;
+    fprintf(stderr, "tidesdb delbatch failed (%d)\n", rc);
+    return -1;
 }
 
 static int tdb_get(void *ctx, const char *k, size_t klen, const char **vp, size_t *vlen)
@@ -206,11 +222,16 @@ static int tdb_del(void *ctx, const char *k, size_t klen)
 {
     tdb *t = ctx;
     tidesdb_txn_t *txn = NULL;
-    if (tidesdb_txn_begin(t->db, &txn) != TDB_SUCCESS) return 0;
-    int rc = tidesdb_txn_delete(txn, t->cf, (const uint8_t *)k, klen);
-    if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
-    tidesdb_txn_free(txn);
-    return rc == TDB_SUCCESS ? 1 : 0;
+    int rc = tidesdb_txn_begin(t->db, &txn);
+    if (rc == TDB_SUCCESS)
+    {
+        rc = tidesdb_txn_delete(txn, t->cf, (const uint8_t *)k, klen);
+        if (rc == TDB_SUCCESS) rc = tidesdb_txn_commit(txn);
+        tidesdb_txn_free(txn);
+    }
+    if (rc == TDB_SUCCESS) return 1;
+    if (tdb_retryable(rc)) return KV_RETRY;
+    return 0;
 }
 
 static int tdb_range(void *ctx, const char *lo, size_t lolen, const char *hi, size_t hilen,

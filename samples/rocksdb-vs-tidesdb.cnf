@@ -9,26 +9,21 @@
 
 [bench]
 backend  = rocksdb,tidesdb
-threads  = 1,8,16,32
+threads  = 1,8,16
 # Seed every cell with this many threads regardless of its run thread count, so
 # the low thread cells do not seed single threaded. Helps on an SSD, where
 # parallel writes are faster, and shortens the grid since seeding is most of the
 # per cell time. On a spinning disk leave it at 0 to seed at the run thread count.
-seed_threads = 8
+seed_threads = 16
 # Seed once per engine and swept value, then run the whole thread sweep and the
 # repeats against that one store instead of reseeding every cell. Much faster
 # here, since reseeding is most of the time. The trade is that later cells run
 # against a store the earlier ones churned, a steady state rather than a fresh
 # dataset per cell. Set it to 0 if you want a clean fresh dataset per cell.
 seed_once = 1
-repeat   = 2
-secs     = 120
-# items and users size the on disk dataset, about 2 GB per workload here, 16
-# times the 64M memtable and block cache so the run exercises sstables and
-# compaction rather than sitting in memory. The grid is about 130 cells, the
-# batch sweep being most of them, and lands near three hours on a spinning disk.
-# Raise items for a heavier dataset, repeat or secs for tighter or longer
-# measurements, both at a roughly linear cost in time.
+repeat   = 1
+secs     = 60
+# About 2gb
 items    = 500000
 users    = 90000
 report_dir = ./results

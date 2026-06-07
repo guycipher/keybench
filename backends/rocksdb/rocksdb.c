@@ -28,6 +28,17 @@ typedef struct
     char path[256];
 } rdb;
 
+/* RocksDB reports through a Status string. Busy is a write conflict, a Try again
+   is the write path asking the caller to retry, and a Result incomplete is a no
+   slowdown write stall, all transient and surfaced as KV_RETRY so the store waits
+   them out. Everything else, from NotFound through IOError and the no space and
+   memory limit aborts, is a real failure the store should not spin on. */
+static int rdb_retryable(const char *err)
+{
+    return err && (strncmp(err, "Busy", 4) == 0 || strncmp(err, "Result incomplete", 17) == 0 ||
+                   strncmp(err, "Operation failed. Try again.", 28) == 0);
+}
+
 static int rdb_put(void *ctx, const char *k, size_t klen, const char *v, size_t vlen)
 {
     rdb *r = ctx;
@@ -35,9 +46,10 @@ static int rdb_put(void *ctx, const char *k, size_t klen, const char *v, size_t 
     rocksdb_put(r->db, r->wopt, k, klen, v, vlen, &err);
     if (err)
     {
-        fprintf(stderr, "rocksdb put: %s\n", err);
+        int retry = rdb_retryable(err);
+        if (!retry) fprintf(stderr, "rocksdb put: %s\n", err);
         free(err);
-        return -1;
+        return retry ? KV_RETRY : -1;
     }
     return 0;
 }
@@ -53,9 +65,10 @@ static int rdb_putbatch(void *ctx, const char *const *keys, const size_t *klens,
     rocksdb_writebatch_destroy(wb);
     if (err)
     {
-        fprintf(stderr, "rocksdb putbatch: %s\n", err);
+        int retry = rdb_retryable(err);
+        if (!retry) fprintf(stderr, "rocksdb putbatch: %s\n", err);
         free(err);
-        return -1;
+        return retry ? KV_RETRY : -1;
     }
     return 0;
 }
@@ -70,9 +83,10 @@ static int rdb_delbatch(void *ctx, const char *const *keys, const size_t *klens,
     rocksdb_writebatch_destroy(wb);
     if (err)
     {
-        fprintf(stderr, "rocksdb delbatch: %s\n", err);
+        int retry = rdb_retryable(err);
+        if (!retry) fprintf(stderr, "rocksdb delbatch: %s\n", err);
         free(err);
-        return -1;
+        return retry ? KV_RETRY : -1;
     }
     return 0;
 }
@@ -105,9 +119,10 @@ static int rdb_del(void *ctx, const char *k, size_t klen)
     rocksdb_delete(r->db, r->wopt, k, klen, &err);
     if (err)
     {
-        fprintf(stderr, "rocksdb del: %s\n", err);
+        int retry = rdb_retryable(err);
+        if (!retry) fprintf(stderr, "rocksdb del: %s\n", err);
         free(err);
-        return 0;
+        return retry ? KV_RETRY : 0;
     }
     return 1;
 }

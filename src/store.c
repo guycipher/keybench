@@ -1,7 +1,20 @@
+#define _POSIX_C_SOURCE 200809L
 #include "store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+
+/* Wait out transient backpressure before retrying a write that returned KV_RETRY,
+   so a stall blocks the writer rather than dropping the write. The wait is a
+   microsecond, just enough to yield to the engine's flush and compaction threads
+   so we do not busy spin and starve its recovery, but far too small to add
+   latency that would obscure the post stall throughput. */
+static void store_backoff(void)
+{
+    struct timespec ts = {0, 1000};
+    nanosleep(&ts, NULL);
+}
 
 static void *xmalloc(size_t n)
 {
@@ -51,16 +64,24 @@ void store_stats(kv_store *s, kv_stat_cb cb, void *arg)
 
 int store_put(kv_store *s, const char *k, size_t klen, const char *v, size_t vlen)
 {
-    return s->be->put(s->be->ctx, k, klen, v, vlen);
+    int rc;
+    while ((rc = s->be->put(s->be->ctx, k, klen, v, vlen)) == KV_RETRY) store_backoff();
+    return rc;
 }
 
 int store_putbatch(kv_store *s, const char *const *keys, const size_t *klens,
                    const char *const *vals, const size_t *vlens, int n)
 {
-    if (s->be->putbatch) return s->be->putbatch(s->be->ctx, keys, klens, vals, vlens, n);
+    if (s->be->putbatch)
+    {
+        int rc;
+        while ((rc = s->be->putbatch(s->be->ctx, keys, klens, vals, vlens, n)) == KV_RETRY)
+            store_backoff();
+        return rc;
+    }
     int rc = 0;
     for (int i = 0; i < n; i++)
-        if (s->be->put(s->be->ctx, keys[i], klens[i], vals[i], vlens[i]) != 0) rc = -1;
+        if (store_put(s, keys[i], klens[i], vals[i], vlens[i]) != 0) rc = -1;
     return rc;
 }
 
@@ -79,15 +100,22 @@ int store_get(kv_store *s, const char *k, size_t klen, char **vp, size_t *vlen)
 
 int store_del(kv_store *s, const char *k, size_t klen)
 {
-    return s->be->del(s->be->ctx, k, klen);
+    int rc;
+    while ((rc = s->be->del(s->be->ctx, k, klen)) == KV_RETRY) store_backoff();
+    return rc;
 }
 
 int store_delbatch(kv_store *s, const char *const *keys, const size_t *klens, int n)
 {
-    if (s->be->delbatch) return s->be->delbatch(s->be->ctx, keys, klens, n);
+    if (s->be->delbatch)
+    {
+        int rc;
+        while ((rc = s->be->delbatch(s->be->ctx, keys, klens, n)) == KV_RETRY) store_backoff();
+        return rc;
+    }
     int rc = 0;
     for (int i = 0; i < n; i++)
-        if (s->be->del(s->be->ctx, keys[i], klens[i]) < 0) rc = -1;
+        if (store_del(s, keys[i], klens[i]) < 0) rc = -1;
     return rc;
 }
 
