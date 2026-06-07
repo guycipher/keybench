@@ -226,6 +226,7 @@ ran.
   --backend L    one engine, or a comma list to compare. e.g. skiplist,rocksdb
   --threads L    one thread count, or a comma list to sweep. e.g. 1,2,4,8
   --seed-threads N  threads that seed the dataset, 0 the default meaning use --threads
+  --seed-once    seed once per engine and swept value, reuse it across the thread sweep
   --repeat N     run each point N times and report the median.
 
 These two grid knobs are global because they are true of every run, the engine
@@ -241,8 +242,16 @@ a single run.
 The seed phase that fills each cell uses the run thread count by default, so a
 thread sweep seeds each cell at its own concurrency. --seed-threads overrides
 that, seeding every cell with that many threads regardless of its run threads, so
-a one thread run cell need not also seed single threaded. An example that
-compares two engines as they scale.
+a one thread run cell need not also seed single threaded.
+
+By default every cell reseeds, since the timed run mutates the store, with puts
+and deletes, and the next cell wants a clean identical dataset. --seed-once seeds
+once per engine and swept value and runs the whole thread sweep and the repeats
+against that one store, which is much faster when reseeding dominates the time.
+The trade is that later cells run against a store the earlier ones already
+churned, so it measures a steady state rather than a fresh dataset per cell, less
+clean for a scaling curve but a fair engine comparison since both churn alike. An
+example that compares two engines as they scale.
 
   ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
              --data-dir /mnt/disk workloads/mixed.lua

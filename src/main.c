@@ -112,6 +112,11 @@ typedef struct
        use the run threads, the default, so a low thread run cell does not seed
        single threaded unless you want it to. */
     int seed_threads;
+    /* Seed once per engine and swept value and reuse that store across the thread
+       sweep and repeats, instead of reseeding every cell. Faster, but later cells
+       run against a store the earlier ones already churned, so it measures a
+       steady state rather than a fresh dataset per cell. Off by default. */
+    int seed_once;
     /* A workload may sweep a parameter of its own. sweep_param names it and
        sweep_value is the current point, set per cell by run_file. NULL means the
        workload sweeps nothing. */
@@ -525,6 +530,7 @@ static void *seed_progress_main(void *arg)
     if (iv_ns < PROGRESS_STEP_NS) iv_ns = PROGRESS_STEP_NS;
     uint64_t prev_t = p->t0, prev_keys = 0;
     uint64_t print_t = p->t0, print_keys = 0;
+    long last_sec = 0;
     long tick = 0;
     while (!p->stop)
     {
@@ -543,11 +549,12 @@ static void *seed_progress_main(void *arg)
         double rate = dt > 0 ? (double)(keys - prev_keys) / dt : 0.0;
         prev_keys = keys;
         prev_t = now;
-        /* Throttle the scrolling line to about a second so a fine sample interval
-           does not spam the terminal, while samples still fire every tick. The
-           live rate spans the whole print interval, not the last fine tick, so a
-           bursty stalling load does not flash zero. */
-        if (p->show && (now - print_t) >= PROGRESS_TICK_NS - PROGRESS_STEP_NS)
+        /* Print one line per whole second so the labels read 1.0 2.0 3.0 cleanly
+           rather than landing on the fine sample grid, and take the rate over the
+           interval since the last line so a bursty stalling load does not flash
+           zero while the count is still moving. */
+        long sec = (long)((now - p->t0) / 1000000000ull);
+        if (p->show && sec > last_sec)
         {
             double pdt = (now - print_t) / 1e9;
             double prate = pdt > 0 ? (double)(keys - print_keys) / pdt : 0.0;
@@ -556,6 +563,7 @@ static void *seed_progress_main(void *arg)
             fflush(stderr);
             print_keys = keys;
             print_t = now;
+            last_sec = sec;
         }
         if (p->sampling)
         {
@@ -577,27 +585,25 @@ static void *seed_progress_main(void *arg)
     return NULL;
 }
 
-static void run_measurement(const char *path, const config *cfg, char *name_out, size_t name_sz,
-                            reporter_set *reporters, point_result *R)
+/* Open the store and seed it across the seed threads, with the live progress and
+   timeline samples. Writes the workload name into name_out and the engine version
+   into *engine_out, returning the seeded store or NULL on error. */
+static kv_store *measure_setup(const char *path, const config *cfg, char *name_out, size_t name_sz,
+                               const char **engine_out, reporter_set *reporters)
 {
-    stats_reset(&R->stats);
-    R->units = 0;
-    R->wall = 0;
-    R->engine = NULL;
-    R->ok = 0;
-
     const backend_entry *eng = backend_find(cfg->backend);
     if (!eng)
     {
         fprintf(stderr, "unknown backend '%s'\n", cfg->backend);
-        return;
+        return NULL;
     }
 
     int nthreads = cfg->threads < 1 ? 1 : cfg->threads;
 
     const kv_options *opts = cfg_section(cfg->conf, eng->name);
     kv_store *store = store_open(eng->open, cfg->seed, cfg->data_dir, opts);
-    R->engine = store_version(store);
+    const char *engine = store_version(store);
+    if (engine_out) *engine_out = engine;
 
     char name[128] = "(unnamed)";
     int has_load = 0;
@@ -608,7 +614,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
         if (!L)
         {
             store_close(store);
-            return;
+            return NULL;
         }
         lua_getfield(L, -1, "name");
         if (lua_isstring(L, -1)) snprintf(name, sizeof name, "%s", lua_tostring(L, -1));
@@ -627,7 +633,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
         int seed_nthreads = cfg->seed_threads > 0 ? cfg->seed_threads : nthreads;
         uint64_t ls = now_ns();
         if (show)
-            fprintf(stderr, "  seeding %s on %s with %d threads\n", name, R->engine, seed_nthreads);
+            fprintf(stderr, "  seeding %s on %s with %d threads\n", name, engine, seed_nthreads);
         load_worker *lw = calloc((size_t)seed_nthreads, sizeof *lw);
         pthread_t *ltids = calloc((size_t)seed_nthreads, sizeof *ltids);
         if (!lw || !ltids)
@@ -655,7 +661,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
                                   .t0 = ls,
                                   .stop = 0,
                                   .workload = name,
-                                  .engine = R->engine,
+                                  .engine = engine,
                                   .show = show,
                                   .sampling = sampling,
                                   .interval = cfg->timeline,
@@ -690,10 +696,25 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
         if (lerr)
         {
             store_close(store);
-            return;
+            return NULL;
         }
     }
+    return store;
+}
 
+/* Run one timed phase against an already seeded store and fill R. Does not close
+   the store, so seed once mode can run the timed phase many times against one
+   seeded store. */
+static void measure_timed(const char *path, const config *cfg, kv_store *store, const char *name,
+                          const char *engine, reporter_set *reporters, point_result *R)
+{
+    stats_reset(&R->stats);
+    R->units = 0;
+    R->wall = 0;
+    R->engine = engine;
+    R->ok = 0;
+
+    int nthreads = cfg->threads < 1 ? 1 : cfg->threads;
     worker *ws = calloc((size_t)nthreads, sizeof *ws);
     pthread_t *tids = calloc((size_t)nthreads, sizeof *tids);
     if (!ws || !tids)
@@ -729,8 +750,8 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
                         .secs = cfg->secs,
                         .t0 = t0,
                         .stop = 0,
-                        .workload = name_out ? name_out : name,
-                        .engine = R->engine,
+                        .workload = name,
+                        .engine = engine,
                         .threads = nthreads,
                         .sweep_param = cfg->sweep_param,
                         .sweep_value = cfg->sweep_value};
@@ -749,8 +770,8 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
                        .t0 = t0,
                        .stop = 0,
                        .reporters = reporters,
-                       .workload = name_out ? name_out : name,
-                       .engine = R->engine,
+                       .workload = name,
+                       .engine = engine,
                        .threads = nthreads,
                        .sweep_param = cfg->sweep_param,
                        .sweep_value = cfg->sweep_value};
@@ -782,6 +803,25 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
 
     free(ws);
     free(tids);
+}
+
+static void run_measurement(const char *path, const config *cfg, char *name_out, size_t name_sz,
+                            reporter_set *reporters, point_result *R)
+{
+    char name[128] = "(unnamed)";
+    const char *engine = NULL;
+    kv_store *store = measure_setup(path, cfg, name, sizeof name, &engine, reporters);
+    if (name_out) snprintf(name_out, name_sz, "%s", name);
+    if (!store)
+    {
+        stats_reset(&R->stats);
+        R->units = 0;
+        R->wall = 0;
+        R->engine = engine;
+        R->ok = 0;
+        return;
+    }
+    measure_timed(path, cfg, store, name, engine, reporters, R);
     store_close(store);
 }
 
@@ -935,8 +975,50 @@ static void run_file(const char *path, const config *base, const char *const *en
     int npoints = neng * ntp * nsteps;
     summary_row *rows = malloc((size_t)npoints * sizeof *rows);
 
+    int tmax = tlist[0];
+    for (int t = 1; t < ntp; t++)
+        if (tlist[t] > tmax) tmax = tlist[t];
+
     for (int ei = 0; ei < neng; ei++)
     {
+        if (base->seed_once)
+        {
+            /* Seed once per swept value, then run the whole thread sweep and the
+               repeats against that one store. The store carries the churn of the
+               earlier cells, the documented trade for not reseeding. The seed
+               uses the busiest thread count of the sweep so it is not slow. */
+            for (int si = 0; si < nsteps; si++)
+            {
+                config sc = *base;
+                sc.backend = engines[ei];
+                sc.threads = tmax;
+                sc.sweep_param = sweep_param;
+                sc.sweep_value = sweep_param ? svals[si] : 0;
+                const char *engine = NULL;
+                kv_store *store = measure_setup(path, &sc, name, sizeof name, &engine, reporters);
+                if (!store) continue;
+                for (int ti = 0; ti < ntp; ti++)
+                {
+                    config pc = sc;
+                    pc.threads = tlist[ti];
+                    int ok = 1;
+                    for (int r = 0; r < repeat; r++)
+                    {
+                        measure_timed(path, &pc, store, name, engine, reporters, &Rs[r]);
+                        if (!Rs[r].ok)
+                        {
+                            ok = 0;
+                            break;
+                        }
+                    }
+                    if (ok)
+                        rows[nrows++] = summarize_point(name, Rs, repeat, pc.threads, sweep_param,
+                                                        pc.sweep_value, reporters);
+                }
+                store_close(store);
+            }
+            continue;
+        }
         for (int ti = 0; ti < ntp; ti++)
         {
             for (int si = 0; si < nsteps; si++)
@@ -1049,6 +1131,7 @@ static void apply_config(const cfg_file *conf, config *cfg, const char **threads
     cfg->items = kv_opt_int(b, "items", cfg->items);
     cfg->seed = (unsigned)kv_opt_int(b, "seed", cfg->seed);
     cfg->seed_threads = (int)kv_opt_int(b, "seed_threads", cfg->seed_threads);
+    cfg->seed_once = (int)kv_opt_int(b, "seed_once", cfg->seed_once);
     *repeat = (int)kv_opt_int(b, "repeat", *repeat);
     *ncfiles = kv_opt_all(b, "workload", cfiles, maxfiles);
 }
@@ -1070,6 +1153,7 @@ static void save_config(const char *path, const config *cfg, const char *engines
     fprintf(f, "backend = %s\n", engines_str);
     fprintf(f, "threads = %s\n", threads_list);
     if (cfg->seed_threads > 0) fprintf(f, "seed_threads = %d\n", cfg->seed_threads);
+    if (cfg->seed_once) fprintf(f, "seed_once = 1\n");
     if (cfg->secs > 0)
         fprintf(f, "secs = %g\n", cfg->secs);
     else
@@ -1205,6 +1289,8 @@ static void usage(const char *p)
         "  --secs S     run each workload for S seconds instead of a fixed count\n"
         "  --threads L  worker-thread counts; a comma list sweeps (e.g. 1,2,4,8) (default 1)\n"
         "  --seed-threads N  threads used to seed the dataset (default 0, meaning use --threads)\n"
+        "  --seed-once  seed once per engine and swept value, reuse across the thread sweep and "
+        "repeats\n"
         "  --repeat N   run each point N times and report the median (default 1)\n"
         "  --report S   reporters, comma list of name[:path] (console, tsv, timeline); e.g. "
         "console,timeline:tl.tsv\n"
@@ -1275,6 +1361,8 @@ int main(int argc, char **argv)
             threads_arg = argv[++i];
         else if (!strcmp(argv[i], "--seed-threads") && i + 1 < argc)
             cfg.seed_threads = (int)arg_long("--seed-threads", argv[++i]);
+        else if (!strcmp(argv[i], "--seed-once"))
+            cfg.seed_once = 1;
         else if (!strcmp(argv[i], "--repeat") && i + 1 < argc)
             repeat = (int)arg_long("--repeat", argv[++i]);
         else if (!strcmp(argv[i], "--report") && i + 1 < argc)
