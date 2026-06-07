@@ -250,8 +250,14 @@ once per engine and swept value and runs the whole thread sweep and the repeats
 against that one store, which is much faster when reseeding dominates the time.
 The trade is that later cells run against a store the earlier ones already
 churned, so it measures a steady state rather than a fresh dataset per cell, less
-clean for a scaling curve but a fair engine comparison since both churn alike. An
-example that compares two engines as they scale.
+clean for a scaling curve but a fair engine comparison since both churn alike.
+
+Across a sweep, seed once seeds each swept value on its own by default, since a
+value may change the dataset, as the value size does. A workload whose swept value
+changes only the run and not the seeded data, as the batch size does, marks its
+sweep seed_per_value false, and seed once then seeds the store one time and shares
+it across the swept values rather than reseeding identical data. An example that
+compares two engines as they scale.
 
   ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
              --data-dir /mnt/disk workloads/mixed.lua

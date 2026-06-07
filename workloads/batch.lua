@@ -86,5 +86,12 @@ end
 
 -- batch sweeps its own parameter, the number of keys per mget/mput call. The
 -- harness iterates these values, injects each as ctx.batch, and labels the
--- report column batch. No other workload reads it.
-return { name = "batch", load = load, run = run, sweep = { param = "batch", values = { 1, 64, 256, 512, 1024 } } }
+-- report column batch. No other workload reads it. seed_per_value is false because
+-- the batch size changes only the run, not the seeded data, so under seed once the
+-- store is seeded once and shared across the sizes instead of reseeded per size.
+return {
+  name = "batch",
+  load = load,
+  run = run,
+  sweep = { param = "batch", values = { 1, 64, 256, 512, 1024 }, seed_per_value = false },
+}

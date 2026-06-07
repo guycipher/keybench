@@ -937,8 +937,9 @@ static summary_row summarize_point(const char *name, point_result *Rs, int nr, i
    it. A workload with no sweep runs once over the thread grid. Read by loading
    the file with no store, since the top-level return touches no kv verbs. */
 static int read_workload_sweep(const char *path, unsigned seed, char *param_out, size_t param_sz,
-                               long *values_out, int max)
+                               long *values_out, int max, int *seed_per_value_out)
 {
+    if (seed_per_value_out) *seed_per_value_out = 1;
     kvlua_ctx kc = {.store = NULL};
     stats_reset(&kc.stats);
     lua_State *L = open_workload(path, &kc, seed);
@@ -965,6 +966,14 @@ static int read_workload_sweep(const char *path, unsigned seed, char *param_out,
             }
         }
         lua_pop(L, 1);
+        /* A sweep whose swept value does not change the seeded dataset, like the
+           batch size, sets this false so seed once seeds the store one time and
+           shares it across the values rather than reseeding identical data. A
+           sweep that does change the dataset, like the value size, leaves it true
+           and seeds each value on its own. */
+        lua_getfield(L, -1, "seed_per_value");
+        if (lua_isboolean(L, -1) && seed_per_value_out) *seed_per_value_out = lua_toboolean(L, -1);
+        lua_pop(L, 1);
         if (param_out[0] == '\0') n = 0;
     }
     lua_pop(L, 1);
@@ -981,7 +990,9 @@ static void run_file(const char *path, const config *base, const char *const *en
 
     char sparam[64] = "";
     long svals[64];
-    int nsw = read_workload_sweep(path, base->seed, sparam, sizeof sparam, svals, 64);
+    int seed_per_value = 1;
+    int nsw =
+        read_workload_sweep(path, base->seed, sparam, sizeof sparam, svals, 64, &seed_per_value);
     const char *sweep_param = nsw > 0 ? sparam : NULL;
     int nsteps = nsw > 0 ? nsw : 1;
 
@@ -994,6 +1005,43 @@ static void run_file(const char *path, const config *base, const char *const *en
 
     for (int ei = 0; ei < neng; ei++)
     {
+        if (base->seed_once && sweep_param && !seed_per_value)
+        {
+            /* The swept value does not change the seeded data, so seed once per
+               engine and run every swept value, thread, and repeat against that one
+               store rather than reseeding identical data per value. */
+            config sc = *base;
+            sc.backend = engines[ei];
+            sc.threads = tmax;
+            sc.sweep_param = sweep_param;
+            sc.sweep_value = svals[0];
+            const char *engine = NULL;
+            kv_store *store = measure_setup(path, &sc, name, sizeof name, &engine, reporters);
+            if (!store) continue;
+            for (int si = 0; si < nsteps; si++)
+                for (int ti = 0; ti < ntp; ti++)
+                {
+                    config pc = sc;
+                    pc.threads = tlist[ti];
+                    pc.sweep_value = svals[si];
+                    int ok = 1;
+                    for (int r = 0; r < repeat; r++)
+                    {
+                        measure_timed(path, &pc, store, name, engine, reporters, &Rs[r], r + 1,
+                                      repeat);
+                        if (!Rs[r].ok)
+                        {
+                            ok = 0;
+                            break;
+                        }
+                    }
+                    if (ok)
+                        rows[nrows++] = summarize_point(name, Rs, repeat, pc.threads, sweep_param,
+                                                        pc.sweep_value, reporters);
+                }
+            store_close(store);
+            continue;
+        }
         if (base->seed_once)
         {
             /* Seed once per swept value, then run the whole thread sweep and the
