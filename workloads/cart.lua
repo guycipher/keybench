@@ -85,15 +85,20 @@ local function cart_bounds(uid)
   return format(BOUNDS_LO_FMT, uid), format(BOUNDS_HI_FMT, uid)
 end
 
+-- Seeding groups this many line items into one kv_mput. It belongs to the load
+-- phase, not the measured run, so it is fixed here like VALUE_BYTES rather than
+-- driven by a flag.
+local SEED_BATCH = 512
+
 -- Seeding is sharded across the worker threads and batched. Each thread seeds
--- the users it owns, ctx.thread of every ctx.threads, grouping ctx.batch line
+-- the users it owns, ctx.thread of every ctx.threads, grouping SEED_BATCH line
 -- items into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
   local users, items = ctx.users, ctx.items
   assert(type(users) == "number" and type(items) == "number", "users/items must be numbers")
   assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
-  local b = max(1, ctx.batch)
+  local b = SEED_BATCH
   local buf = {}
   for j = 1, b do buf[j] = { key = "", val = VALUE } end
   local n = 0

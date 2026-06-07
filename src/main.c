@@ -108,7 +108,11 @@ typedef struct
     long items;
     unsigned seed;
     int threads;
-    int batch;
+    /* A workload may sweep a parameter of its own. sweep_param names it and
+       sweep_value is the current point, set per cell by run_file. NULL means the
+       workload sweeps nothing. */
+    const char *sweep_param;
+    long sweep_value;
     double timeline;
     const char *backend;
     const char *data_dir;
@@ -157,8 +161,11 @@ static int make_ctx(lua_State *L, const config *c, int tid, int nthreads)
     lua_setfield(L, -2, "ops");
     lua_pushinteger(L, c->seed);
     lua_setfield(L, -2, "seed");
-    lua_pushinteger(L, c->batch);
-    lua_setfield(L, -2, "batch");
+    if (c->sweep_param)
+    {
+        lua_pushinteger(L, c->sweep_value);
+        lua_setfield(L, -2, c->sweep_param);
+    }
     lua_pushinteger(L, tid);
     lua_setfield(L, -2, "thread");
     lua_pushinteger(L, nthreads);
@@ -273,7 +280,9 @@ typedef struct
     volatile int stop;
     reporter_set *reporters;
     const char *workload, *engine;
-    int threads, batch;
+    int threads;
+    const char *sweep_param;
+    long sweep_value;
 } sampler;
 
 typedef struct
@@ -350,8 +359,14 @@ static void *sampler_main(void *arg)
             nm++;
         }
 
-        report_sample rs = {
-            sp->workload, sp->engine, sp->threads, sp->batch, (double)(nowt - sp->t0) / 1e9, m, nm};
+        report_sample rs = {sp->workload,
+                            sp->engine,
+                            sp->threads,
+                            sp->sweep_param,
+                            sp->sweep_value,
+                            (double)(nowt - sp->t0) / 1e9,
+                            m,
+                            nm};
         reporters_sample(sp->reporters, &rs);
     }
     return NULL;
@@ -375,7 +390,9 @@ typedef struct
     uint64_t t0;
     volatile int stop;
     const char *workload, *engine;
-    int threads, batch;
+    int threads;
+    const char *sweep_param;
+    long sweep_value;
 } progress;
 
 #define PROGRESS_TICK_NS 1000000000ull
@@ -410,12 +427,17 @@ static void *progress_main(void *arg)
         double elapsed = (now - p->t0) / 1e9;
         prev_units = units;
         prev_t = now;
-        if (p->secs > 0)
-            fprintf(stderr, "  %s %s t%d b%d  %5.1f/%.0fs  %9.0f wu/s\n", p->workload, p->engine,
-                    p->threads, p->batch, elapsed, p->secs, rate);
+        char tag[48];
+        if (p->sweep_param)
+            snprintf(tag, sizeof tag, "t%d %s=%ld", p->threads, p->sweep_param, p->sweep_value);
         else
-            fprintf(stderr, "  %s %s t%d b%d  %5.1fs  %9.0f wu/s  %3.0f%% (%ld/%ld)\n", p->workload,
-                    p->engine, p->threads, p->batch, elapsed, rate,
+            snprintf(tag, sizeof tag, "t%d", p->threads);
+        if (p->secs > 0)
+            fprintf(stderr, "  %s %s %s  %5.1f/%.0fs  %9.0f wu/s\n", p->workload, p->engine, tag,
+                    elapsed, p->secs, rate);
+        else
+            fprintf(stderr, "  %s %s %s  %5.1fs  %9.0f wu/s  %3.0f%% (%ld/%ld)\n", p->workload,
+                    p->engine, tag, elapsed, rate,
                     p->target > 0 ? 100.0 * (double)units / (double)p->target : 0.0, units,
                     p->target);
         fflush(stderr);
@@ -434,9 +456,10 @@ typedef struct
 } load_worker;
 
 /* Seed a shard of the dataset in parallel. The workload's load() reads
-   ctx.thread and ctx.threads to write only its slice, and ctx.batch to group
-   writes, so N threads fill the store together instead of one doing it all. The
-   kc lives in the struct so a progress thread can read keys seeded as it runs. */
+   ctx.thread and ctx.threads to write only its slice, and groups its writes with
+   its own seed batch, so N threads fill the store together instead of one doing
+   it all. The kc lives in the struct so a progress thread can read keys seeded
+   as it runs. */
 static void *load_worker_main(void *arg)
 {
     load_worker *w = arg;
@@ -643,7 +666,8 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
                         .workload = name_out ? name_out : name,
                         .engine = R->engine,
                         .threads = nthreads,
-                        .batch = cfg->batch};
+                        .sweep_param = cfg->sweep_param,
+                        .sweep_value = cfg->sweep_value};
         pthread_create(&prtid, NULL, progress_main, &pr);
     }
 
@@ -662,7 +686,8 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
                        .workload = name_out ? name_out : name,
                        .engine = R->engine,
                        .threads = nthreads,
-                       .batch = cfg->batch};
+                       .sweep_param = cfg->sweep_param,
+                       .sweep_value = cfg->sweep_value};
         pthread_create(&sptid, NULL, sampler_main, &sp);
     }
 
@@ -697,20 +722,23 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
 typedef struct
 {
     const char *engine;
-    int threads, batch;
+    int threads;
+    long sweep_value;
     double wu_s, ops_s, p50, p99;
 } summary_row;
 
 static summary_row summarize_point(const char *name, point_result *Rs, int nr, int threads,
-                                   int batch, reporter_set *reporters)
+                                   const char *sweep_param, long sweep_value,
+                                   reporter_set *reporters)
 {
-    summary_row row = {.engine = Rs[0].engine, .threads = threads, .batch = batch};
+    summary_row row = {.engine = Rs[0].engine, .threads = threads, .sweep_value = sweep_value};
     double *tmp = malloc((size_t)nr * sizeof *tmp);
     report_point rp = {0};
     rp.workload = name;
     rp.engine = Rs[0].engine;
     rp.threads = threads;
-    rp.batch = batch;
+    rp.sweep_param = sweep_param;
+    rp.sweep_value = sweep_value;
     rp.repeat = nr;
 
     for (int i = 0; i < OP__COUNT && rp.n_ops < REPORT_MAX_OPS; i++)
@@ -784,52 +812,74 @@ static summary_row summarize_point(const char *name, point_result *Rs, int nr, i
     return row;
 }
 
-/* A workload opts into the batch sweep by returning batched = true in its table.
-   Only mget/mput style workloads respond to ctx.batch; the rest do identical
-   work at every batch size, so keybench runs them once at batch 1 rather than
-   repeating the same measurement. The flag is read by loading the file with no
-   store, since the top-level return touches no kv verbs. */
-static int read_workload_batched(const char *path, unsigned seed)
+/* A workload may sweep a parameter of its own by returning
+   sweep = { param = "<name>", values = { n, ... } }. keybench iterates the
+   values, injects each into ctx under <name>, and labels the report column with
+   it. A workload with no sweep runs once over the thread grid. Read by loading
+   the file with no store, since the top-level return touches no kv verbs. */
+static int read_workload_sweep(const char *path, unsigned seed, char *param_out, size_t param_sz,
+                               long *values_out, int max)
 {
     kvlua_ctx kc = {.store = NULL};
     stats_reset(&kc.stats);
     lua_State *L = open_workload(path, &kc, seed);
     if (!L) return 0;
-    lua_getfield(L, -1, "batched");
-    int batched = lua_toboolean(L, -1);
+    int n = 0;
+    lua_getfield(L, -1, "sweep");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "param");
+        if (lua_isstring(L, -1))
+            snprintf(param_out, param_sz, "%s", lua_tostring(L, -1));
+        else
+            param_out[0] = '\0';
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "values");
+        if (lua_istable(L, -1))
+        {
+            int len = (int)luaL_len(L, -1);
+            for (int i = 1; i <= len && n < max; i++)
+            {
+                lua_geti(L, -1, i);
+                if (lua_isnumber(L, -1)) values_out[n++] = (long)lua_tointeger(L, -1);
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+        if (param_out[0] == '\0') n = 0;
+    }
     lua_pop(L, 1);
     lua_close(L);
-    return batched;
+    return n;
 }
 
 static void run_file(const char *path, const config *base, const char *const *engines, int neng,
-                     const int *tlist, int ntp, const int *blist, int nbp, int repeat,
-                     reporter_set *reporters)
+                     const int *tlist, int ntp, int repeat, reporter_set *reporters)
 {
     point_result *Rs = malloc((size_t)repeat * sizeof *Rs);
     char name[128] = "(unnamed)";
     int nrows = 0;
 
-    static const int one_batch = 1;
-    if (!read_workload_batched(path, base->seed) && nbp > 1)
-    {
-        fprintf(stderr, "%s: workload ignores ctx.batch, running batch=1 only\n", path);
-        blist = &one_batch;
-        nbp = 1;
-    }
-    int npoints = neng * ntp * nbp;
+    char sparam[64] = "";
+    long svals[64];
+    int nsw = read_workload_sweep(path, base->seed, sparam, sizeof sparam, svals, 64);
+    const char *sweep_param = nsw > 0 ? sparam : NULL;
+    int nsteps = nsw > 0 ? nsw : 1;
+
+    int npoints = neng * ntp * nsteps;
     summary_row *rows = malloc((size_t)npoints * sizeof *rows);
 
     for (int ei = 0; ei < neng; ei++)
     {
         for (int ti = 0; ti < ntp; ti++)
         {
-            for (int bi = 0; bi < nbp; bi++)
+            for (int si = 0; si < nsteps; si++)
             {
                 config pc = *base;
                 pc.backend = engines[ei];
                 pc.threads = tlist[ti];
-                pc.batch = blist[bi];
+                pc.sweep_param = sweep_param;
+                pc.sweep_value = sweep_param ? svals[si] : 0;
                 int ok = 1;
                 for (int r = 0; r < repeat; r++)
                 {
@@ -841,7 +891,8 @@ static void run_file(const char *path, const config *base, const char *const *en
                     }
                 }
                 if (!ok) continue;
-                rows[nrows++] = summarize_point(name, Rs, repeat, pc.threads, pc.batch, reporters);
+                rows[nrows++] = summarize_point(name, Rs, repeat, pc.threads, sweep_param,
+                                                pc.sweep_value, reporters);
             }
         }
     }
@@ -849,15 +900,23 @@ static void run_file(const char *path, const config *base, const char *const *en
     if (npoints > 1 && nrows > 0)
     {
         printf("\n%s: sweep summary (medians)\n", name);
-        printf("%-12s %8s %6s %14s %14s %10s %10s\n", "engine", "threads", "batch", "wu/sec",
-               "ops/sec", "p50", "p99");
+        if (sweep_param)
+            printf("%-12s %8s %8s %14s %14s %10s %10s\n", "engine", "threads", sweep_param,
+                   "wu/sec", "ops/sec", "p50", "p99");
+        else
+            printf("%-12s %8s %14s %14s %10s %10s\n", "engine", "threads", "wu/sec", "ops/sec",
+                   "p50", "p99");
         char p50[32], p99[32];
         for (int i = 0; i < nrows; i++)
         {
             fmt_ns((uint64_t)rows[i].p50, p50, sizeof p50);
             fmt_ns((uint64_t)rows[i].p99, p99, sizeof p99);
-            printf("%-12s %8d %6d %14.0f %14.0f %10s %10s\n", rows[i].engine, rows[i].threads,
-                   rows[i].batch, rows[i].wu_s, rows[i].ops_s, p50, p99);
+            if (sweep_param)
+                printf("%-12s %8d %8ld %14.0f %14.0f %10s %10s\n", rows[i].engine, rows[i].threads,
+                       rows[i].sweep_value, rows[i].wu_s, rows[i].ops_s, p50, p99);
+            else
+                printf("%-12s %8d %14.0f %14.0f %10s %10s\n", rows[i].engine, rows[i].threads,
+                       rows[i].wu_s, rows[i].ops_s, p50, p99);
         }
     }
 
@@ -907,15 +966,14 @@ static int parse_int_list(const char *s, int *out, int max)
 }
 
 static void apply_config(const cfg_file *conf, config *cfg, const char **threads_arg,
-                         const char **batch_arg, const char **report_arg, int *repeat,
-                         const char **cfiles, int *ncfiles, int maxfiles)
+                         const char **report_arg, int *repeat, const char **cfiles, int *ncfiles,
+                         int maxfiles)
 {
     const kv_options *b = cfg_section(conf, "bench");
     if (!b) return;
     const char *s;
     if ((s = kv_opt_str(b, "backend", NULL))) cfg->backend = s;
     if ((s = kv_opt_str(b, "threads", NULL))) *threads_arg = s;
-    if ((s = kv_opt_str(b, "batch", NULL))) *batch_arg = s;
     if ((s = kv_opt_str(b, "report", NULL))) *report_arg = s;
     if ((s = kv_opt_str(b, "secs", NULL))) cfg->secs = atof(s);
     if ((s = kv_opt_str(b, "timeline", NULL))) cfg->timeline = atof(s);
@@ -929,9 +987,9 @@ static void apply_config(const cfg_file *conf, config *cfg, const char **threads
 }
 
 static void save_config(const char *path, const config *cfg, const char *engines_str,
-                        const char *threads_list, const char *batch_list, int repeat,
-                        const char *report_arg, const char *report_dir, const char *const *files,
-                        int nfiles, const cfg_file *conf)
+                        const char *threads_list, int repeat, const char *report_arg,
+                        const char *report_dir, const char *const *files, int nfiles,
+                        const cfg_file *conf)
 {
     FILE *f = fopen(path, "w");
     if (!f)
@@ -944,7 +1002,6 @@ static void save_config(const char *path, const config *cfg, const char *engines
     fprintf(f, "[bench]\n");
     fprintf(f, "backend = %s\n", engines_str);
     fprintf(f, "threads = %s\n", threads_list);
-    fprintf(f, "batch   = %s\n", batch_list);
     if (cfg->secs > 0)
         fprintf(f, "secs = %g\n", cfg->secs);
     else
@@ -1057,10 +1114,7 @@ static void usage(const char *p)
         "(default 200000)\n"
         "  --secs S     run each workload for S seconds instead of a fixed count\n"
         "  --threads L  worker-thread counts; a comma list sweeps (e.g. 1,2,4,8) (default 1)\n"
-        "  --batch L    ctx.batch sizes for mget/mput; a comma list sweeps (e.g. 1,8,64) (default "
-        "1)\n"
-        "  --repeat N   run each (threads x batch) point N times and report the median (default "
-        "1)\n"
+        "  --repeat N   run each point N times and report the median (default 1)\n"
         "  --report S   reporters, comma list of name[:path] (console, tsv, timeline); e.g. "
         "console,timeline:tl.tsv\n"
         "  --report-dir D  create D/<timestamp>/ and write report.txt, points.tsv, timeline.tsv, "
@@ -1087,13 +1141,12 @@ int main(int argc, char **argv)
                   .items = 100000,
                   .seed = 1,
                   .threads = 1,
-                  .batch = 1,
                   .backend = NULL,
                   .data_dir = NULL,
                   .conf = NULL};
     const char *files[64];
     int nfiles = 0;
-    const char *threads_arg = NULL, *batch_arg = NULL, *report_arg = NULL, *save_arg = NULL;
+    const char *threads_arg = NULL, *report_arg = NULL, *save_arg = NULL;
     const char *probe_arg = NULL, *report_dir_arg = NULL;
     int repeat = 1;
 
@@ -1115,8 +1168,7 @@ int main(int argc, char **argv)
     }
     if (conf)
     {
-        apply_config(conf, &cfg, &threads_arg, &batch_arg, &report_arg, &repeat, cfiles, &ncfiles,
-                     64);
+        apply_config(conf, &cfg, &threads_arg, &report_arg, &repeat, cfiles, &ncfiles, 64);
         cfg.conf = conf;
     }
 
@@ -1128,8 +1180,6 @@ int main(int argc, char **argv)
             cfg.secs = arg_double("--secs", argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc)
             threads_arg = argv[++i];
-        else if (!strcmp(argv[i], "--batch") && i + 1 < argc)
-            batch_arg = argv[++i];
         else if (!strcmp(argv[i], "--repeat") && i + 1 < argc)
             repeat = (int)arg_long("--repeat", argv[++i]);
         else if (!strcmp(argv[i], "--report") && i + 1 < argc)
@@ -1228,7 +1278,7 @@ int main(int argc, char **argv)
                 "benchmarking memory and not a disk\n",
                 cfg.data_dir);
 
-    int tlist[64] = {1}, blist[64] = {1}, ntp = 1, nbp = 1;
+    int tlist[64] = {1}, ntp = 1;
     if (threads_arg)
     {
         ntp = parse_int_list(threads_arg, tlist, 64);
@@ -1236,15 +1286,6 @@ int main(int argc, char **argv)
         {
             tlist[0] = 1;
             ntp = 1;
-        }
-    }
-    if (batch_arg)
-    {
-        nbp = parse_int_list(batch_arg, blist, 64);
-        if (nbp < 1)
-        {
-            blist[0] = 1;
-            nbp = 1;
         }
     }
     if (repeat < 1) repeat = 1;
@@ -1266,8 +1307,8 @@ int main(int argc, char **argv)
 
     if (save_arg)
         save_config(save_arg, &cfg, cfg.backend ? cfg.backend : engines[0],
-                    threads_arg ? threads_arg : "1", batch_arg ? batch_arg : "1", repeat,
-                    report_arg, report_dir_arg, wl, nwl, conf);
+                    threads_arg ? threads_arg : "1", repeat, report_arg, report_dir_arg, wl, nwl,
+                    conf);
 
     if (!probe_arg && conf)
     {
@@ -1302,7 +1343,6 @@ int main(int argc, char **argv)
         .seed = cfg.seed,
         .repeat = repeat,
         .threads_list = threads_arg ? threads_arg : "1",
-        .batch_list = batch_arg ? batch_arg : "1",
         .nworkloads = nwl,
     };
     reporters_run(&reporters, &run);
@@ -1310,7 +1350,7 @@ int main(int argc, char **argv)
     emit_probes(&reporters);
 
     for (int i = 0; i < nwl; i++)
-        run_file(wl[i], &cfg, engines, neng, tlist, ntp, blist, nbp, repeat, &reporters);
+        run_file(wl[i], &cfg, engines, neng, tlist, ntp, repeat, &reporters);
 
     reporters_close(&reporters);
     cfg_free(conf);

@@ -17,7 +17,12 @@ typedef struct
 {
     const char *workload;
     const char *engine;
-    int threads, batch, repeat;
+    int threads, repeat;
+    /* When the workload sweeps a parameter of its own, sweep_param names it and
+       sweep_value is the current point. sweep_param is NULL and sweep_value is 1
+       when the workload sweeps nothing. */
+    const char *sweep_param;
+    long sweep_value;
     report_op ops[REPORT_MAX_OPS];
     int n_ops;
     int has_hit;
@@ -33,7 +38,6 @@ typedef struct
     unsigned seed;
     int repeat;
     const char *threads_list;
-    const char *batch_list;
     int nworkloads;
 } report_run;
 
@@ -46,7 +50,9 @@ typedef struct
 {
     const char *workload;
     const char *engine;
-    int threads, batch;
+    int threads;
+    const char *sweep_param;
+    long sweep_value;
     double elapsed_s;
     const sample_metric *m;
     int nm;

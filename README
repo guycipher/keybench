@@ -56,7 +56,8 @@ load function, and a run function. load seeds the store before timing, and the
 harness runs it on every worker thread at once, each filling its own shard, so a
 large dataset loads in parallel. run is the measured unit and the harness calls
 it until the op budget or the time budget is spent. Both receive a ctx table
-carrying users, items, ops, seed, batch, thread, threads, and the current iter.
+carrying users, items, ops, seed, thread, threads, the current iter, and, when
+the workload sweeps a parameter of its own, that parameter under its own name.
 
 The store is one verb set over every engine. Your script calls a global kv
 table. The same eight verbs reach whichever engine is selected. keybench times
@@ -92,7 +93,7 @@ To compile in the persistent engines, name them.
   make BACKENDS="skiplist rocksdb tidesdb"
 
 No special allocator is linked by default, keybench uses the system one. If a
-distro rocksdb or tidesdb was itself built against jemalloc, link the same
+distro rocksdb or tidesdb was itself built against jemalloc or other, link the same
 allocator first with ALLOC=jemalloc so the whole malloc family agrees, which
 avoids a crash when a database is reopened across sweep points. ALLOC=tcmalloc
 works too, and ALLOC_LIBS="..." links any other allocator or a custom path. The
@@ -128,7 +129,7 @@ needs no disk. A persistent engine writes to a drive, so name one with
   ./keybench --backend rocksdb --data-dir /mnt/disk workloads/mixed.lua
 
   keybench 0.1.0: 1 workload(s), engine=rocksdb seed=1 repeat=1
-    threads: 1   batch: 1
+    threads: 1
   [probe: system]
     host           agpmastersystem
     os             Linux 6.2.0-39-generic x86_64
@@ -147,14 +148,14 @@ needs no disk. A persistent engine writes to a drive, so name one with
     allocator      jemalloc (glibc 2.37)
 
   === mixed ===
-  engine=rocksdb 11.1.1  threads=1  batch=1  (median of 1 run)
+  engine=rocksdb 11.1.1  threads=1  (median of 1 run)
   op             count        p50        p99      p99.9        max
-  put            60404    8.64 us   22.91 us   75.26 us  376.62 us
-  get            99617   10.43 us   31.36 us   46.34 us  108.91 us
-  del            19955    4.19 us   15.17 us   29.82 us   47.02 us
-  range          20024  407.55 us  643.07 us  806.91 us    1.04 ms
+  put            60404    8.26 us   20.35 us   61.70 us  143.73 us
+  get            99617    9.54 us   28.80 us   40.70 us  102.28 us
+  del            19955    3.95 us   12.48 us   20.86 us  102.90 us
+  range          20024  391.17 us  577.54 us  692.22 us  790.09 us
   get hit rate: 92.2%
-  throughput: 17819 /sec (1 op per unit)
+  throughput: 18658 /sec (1 op per unit)
 
 The system probe records the machine, including the device, filesystem, and
 solid state or rotational nature of the drive behind --data-dir, which is the
@@ -167,27 +168,36 @@ differs, ops/s.
 Live progress
 =============
 
-While a point runs, keybench streams a status line to stderr once a second, so a
-long point looks alive rather than hung. It first prints a seeding line for the
-untimed load phase, then one line per second, each its own line so the output
-scrolls as a log rather than rewriting one spot. A time bounded point shows the
-elapsed and budget seconds and the current rate.
+Both phases of a point stream to stderr once a second, so a long point looks
+alive rather than hung. The seed phase prints a line per second, the keys written
+so far and the current rate, then a done line with the total. The timed phase
+then prints its own line per second, each its own line so the output scrolls as a
+log rather than rewriting one spot. The seed of a large dataset is itself worth
+watching.
 
-  seeding cart on rocksdb 11.1.1 with 8 threads ... done (1.8s)
-  cart rocksdb 11.1.1 t8 b1    1.0/5s     776154 wu/s
-  cart rocksdb 11.1.1 t8 b1    2.0/5s     626071 wu/s
-  cart rocksdb 11.1.1 t8 b1    3.0/5s     578264 wu/s
+  seeding cart on rocksdb 11.1.1 with 8 threads
+  seeding cart rocksdb 11.1.1    1.0s        193024 keys      192349 keys/s
+  seeding cart rocksdb 11.1.1    2.0s        402944 keys      209217 keys/s
+  seeding cart rocksdb 11.1.1    3.0s        565760 keys      162202 keys/s
+  seeded cart in 10.0s
 
-A count bounded point shows the elapsed seconds, the rate, and the percent of
-the op budget done.
+A time bounded point shows the elapsed and budget seconds and the current rate.
 
-  mixed rocksdb 11.1.1 t1 b1    2.0s     161301 wu/s   43% (341639/800000)
-  mixed rocksdb 11.1.1 t1 b1    3.0s     147362 wu/s   61% (489498/800000)
-  mixed rocksdb 11.1.1 t1 b1    4.0s     138006 wu/s   78% (627934/800000)
+  cart rocksdb 11.1.1 t8    1.0/6s      57632 wu/s
+  cart rocksdb 11.1.1 t8    2.0/6s     182627 wu/s
+  cart rocksdb 11.1.1 t8    3.0/6s      39907 wu/s
 
-The status goes to stderr and only when stderr is a terminal, so it never lands
-in a piped or redirected log and never mixes into the stdout report or the tsv
-streams.
+A count bounded point shows the elapsed seconds, the rate, and the percent of the
+op budget done.
+
+  mixed rocksdb 11.1.1 t1    1.0s      24057 wu/s   10% (24143/250000)
+  mixed rocksdb 11.1.1 t1    2.0s      22644 wu/s   19% (46865/250000)
+  mixed rocksdb 11.1.1 t1    3.0s      23500 wu/s   28% (70453/250000)
+
+When a workload sweeps a parameter, its current value joins the label, as
+t8 batch=256. The status goes to stderr and only when stderr is a terminal, so it
+never lands in a piped or redirected log and never mixes into the stdout report
+or the tsv streams.
 
 
 Choosing the work
@@ -215,15 +225,17 @@ ran.
 
   --backend L    one engine, or a comma list to compare. e.g. skiplist,rocksdb
   --threads L    one thread count, or a comma list to sweep. e.g. 1,2,4,8
-  --batch L      one batch size, or a comma list to sweep. e.g. 1,8,64
   --repeat N     run each point N times and report the median.
 
-The grid is the cross product of engines, thread counts, and batch sizes. Only a
-workload that opts into batching, by returning batched true, varies with the
-batch knob, so the others run once at batch one rather than repeating an
-identical measurement across the batch list. Each cell is run --repeat times and
-reduced to a median, which damps the noise of a single run. An example that
-compares two engines as they scale.
+These two grid knobs are global because they are true of every run, the engine
+list to compare engines and the thread list to scale concurrency. A workload may
+also sweep a parameter of its own, declared in its table, and keybench folds that
+into the grid for the workload that declares it and no other. The batch workload
+sweeps the key count per call, the valsize workload sweeps the value size, and a
+plain workload sweeps nothing and just runs the engine and thread grid. So the
+grid is engines times thread counts times whatever the workload itself sweeps.
+Each cell is run --repeat times and reduced to a median, which damps the noise of
+a single run. An example that compares two engines as they scale.
 
   ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
              --data-dir /mnt/disk workloads/mixed.lua
@@ -281,13 +293,12 @@ that engine and is handed to it at open time.
   --save-config F   write the effective run to F as a replay config.
 
 The sample at samples/rocksdb-vs-tidesdb.cnf compares the two persistent
-engines across a thread and batch sweep.
+engines across a thread sweep.
 
   [bench]
   backend  = rocksdb,tidesdb
-  ops      = 2000000
+  secs     = 300
   threads  = 1,8,16,32,64
-  batch    = 1,64,256,512,1024
   repeat   = 3
   report_dir = ./results
   data_dir = /mnt/disk
@@ -332,8 +343,9 @@ Examples
 ========
 
 The execution model in one breath. A run is a grid, the cross product of the
-engine list, the thread list, and the batch list, and keybench runs that grid
-once per workload file, in the order the files are given. Each cell of the grid
+engine list, the thread list, and whatever parameter the workload itself sweeps,
+and keybench runs that grid once per workload file, in the order the files are
+given. Each cell of the grid
 is measured --repeat times and reduced to a median. Every measurement opens a
 fresh engine store in its own temporary directory under --data-dir, runs the
 untimed load to seed it, runs the timed phase, then tears the store down, so no
@@ -367,10 +379,16 @@ Scale across threads. The thread list is a sweep, here six points.
 
   ./keybench --backend tidesdb --threads 1,2,4,8,16,32 --secs 20 --data-dir /mnt/disk workloads/cart.lua
 
-Trace batch amortization. Only batch.lua reads ctx.batch, so the batch list
-sweeps it while a workload that does not opt in runs once at batch one.
+Trace batch amortization. batch.lua declares its own batch sweep, so it runs
+once per batch size with no flag for it, while a workload that sweeps nothing
+runs once over the thread grid.
 
-  ./keybench --backend rocksdb --batch 1,8,64,512 --ops 2000000 --data-dir /mnt/disk workloads/batch.lua
+  ./keybench --backend rocksdb --secs 20 --data-dir /mnt/disk workloads/batch.lua
+
+Sweep the value size. valsize declares a sweep over its record size the same way,
+so the curve shows how an engine responds as values grow into large blobs.
+
+  ./keybench --backend rocksdb --secs 20 --items 200000 --data-dir /mnt/disk workloads/valsize.lua
 
 A full grid with repeats. Two engines by four thread counts is eight cells, each
 run three times and reduced to a median, with a summary table at the end.
@@ -420,7 +438,8 @@ Plotting
 ========
 
 scripts/plot.py renders the tsv artifacts of one or more result directories
-into figures, throughput bars, scalability curves, batch amortization, latency
+into figures, throughput bars, scalability curves, one amortization curve per
+workload that sweeps a parameter labeled by whatever it sweeps, latency
 percentiles, and the live timelines. The system timeline figure carries every
 metric the system probe records, and the engine internals are drawn one figure
 per engine, since RocksDB and TidesDB report different metric names and so never
@@ -449,10 +468,22 @@ A workload file returns a table.
   return { name = "mine", load = load, run = run }
 
 name labels the report. load is optional and seeds the store before timing. run
-is the measured unit and runs many times. Both take ctx. A workload that reads
-ctx.batch through kv.mget or kv.mput also returns batched = true, which tells
-keybench to sweep it over the batch sizes. Without that the batch sweep is
-skipped for the file and it runs once at batch one.
+is the measured unit and runs many times. Both take ctx. A workload may also
+declare a parameter to sweep with a sweep field, a param name and a list of
+values, and keybench runs the file once per value, injecting each into ctx under
+that name and labeling the report column with it.
+
+  return {
+    name  = "mine",
+    load  = load,
+    run   = run,
+    sweep = { param = "batch", values = { 1, 64, 256, 1024 } },
+  }
+
+The sweep is the workload's own, not a global flag, so only the file that
+declares one varies with it. batch.lua sweeps the key count per call and
+valsize.lua sweeps the value size, while a file with no sweep just runs the
+engine and thread grid.
 
   local function load(ctx)
     for i = ctx.thread, ctx.items - 1, ctx.threads do
@@ -465,14 +496,16 @@ skipped for the file and it runs once at batch one.
     kv.get(k)
   end
 
-ctx carries users, items, ops, seed, batch, thread, threads, and iter, the one
-based index of the current call. load runs on every worker thread at once, each
-in its own Lua state, so seed only this thread's shard, the keys where i is
-ctx.thread of every ctx.threads, otherwise each thread would write the whole
-dataset. Grouping the writes into one kv.mput of ctx.batch keys makes a large
-seed commit as one engine batch. run runs in a fresh state too, so a value
-captured in load is not visible in it. Read the keyspace size from ctx on every
-run() call rather than from an upvalue.
+ctx carries users, items, ops, seed, thread, threads, iter, the one based index
+of the current call, and the swept parameter under its own name when the workload
+declares one. load runs on every worker thread at once, each in its own Lua
+state, so seed only this thread's shard, the keys where i is ctx.thread of every
+ctx.threads, otherwise each thread would write the whole dataset. Grouping the
+writes into one kv.mput of a fixed size, a constant the workload owns like its
+value size, makes a large seed commit as one engine batch and is independent of
+anything the run phase sweeps. run runs in a fresh state too, so a value captured
+in load is not visible in it. Read the keyspace size from ctx on every run() call
+rather than from an upvalue.
 
 users and items are knobs the workload interprets, not fixed benchmark settings.
 keybench only forwards them through ctx. By convention items is the keyspace or
@@ -498,8 +531,13 @@ The bundled workloads are worth reading as patterns.
   scan    the streaming range read kv.scan, which calls back per row and builds
           no table, so a scan of millions of rows uses constant memory. Reads
           items as its keyspace and ignores users.
-  batch   the multi key verbs kv.mget and kv.mput. Sweeping --batch traces the
-          amortization curve. Reads items as its keyspace and ignores users.
+  batch   the multi key verbs kv.mget and kv.mput. Declares a sweep over the
+          number of keys per call, so its curve is the amortization curve. Reads
+          items as its keyspace and ignores users.
+  valsize the mixed blend run across a sweep of value sizes, from a small record
+          to a one megabyte blob. Declares a sweep over ctx.valuebytes and stores
+          values of that size, so its curve shows how an engine handles growing
+          records. Reads items as its keyspace and ignores users.
 
 
 The kv verb set
@@ -523,9 +561,9 @@ whole result as a Lua array. kv.scan streams and never builds a table, so it is
 the right verb for large reads. The callback passed to kv.scan must not call
 kv.put or kv.del, an engine that scans under its own read lock would deadlock on
 the re entrant write. mget, mput, and mdel record one latency sample but count
-batch primitive ops, which is how sweeping --batch shows amortization. mput and
-mdel commit the whole batch as one engine write, a RocksDB write batch or a
-TidesDB transaction, rather than one write per key.
+their batch of primitive ops, which is how a workload that sweeps its batch size
+shows amortization. mput and mdel commit the whole batch as one engine write, a
+RocksDB write batch or a TidesDB transaction, rather than one write per key.
 
 
 Engines
@@ -576,7 +614,7 @@ and libraries. Compile it in with make BACKENDS="skiplist <name>". The core
 never changes.
 
 
-Repository layout
+Source layout
 ================
 
   src/            the engine agnostic harness
@@ -593,6 +631,3 @@ Repository layout
   scripts/        plot.py and the Lua fetch helper
   samples/        an example config
   vendor/         the vendored Lua sources
-
-
-Version 0.1.0.

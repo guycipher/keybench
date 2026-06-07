@@ -24,7 +24,7 @@ static void console_run(reporter *r, const report_run *run)
 {
     fprintf(r->out, "keybench %s: %d workload(s), engine=%s seed=%u repeat=%d\n", KEYBENCH_VERSION,
             run->nworkloads, run->engine, run->seed, run->repeat);
-    fprintf(r->out, "  threads: %s   batch: %s\n", run->threads_list, run->batch_list);
+    fprintf(r->out, "  threads: %s\n", run->threads_list);
 }
 
 static void console_probe(reporter *r, const report_probe *p)
@@ -35,8 +35,13 @@ static void console_probe(reporter *r, const report_probe *p)
 
 static void console_point(reporter *r, const report_point *p)
 {
-    fprintf(r->out, "\n=== %s ===\nengine=%s  threads=%d  batch=%d  (median of %d run%s)\n",
-            p->workload, p->engine, p->threads, p->batch, p->repeat, p->repeat == 1 ? "" : "s");
+    if (p->sweep_param)
+        fprintf(r->out, "\n=== %s ===\nengine=%s  threads=%d  %s=%ld  (median of %d run%s)\n",
+                p->workload, p->engine, p->threads, p->sweep_param, p->sweep_value, p->repeat,
+                p->repeat == 1 ? "" : "s");
+    else
+        fprintf(r->out, "\n=== %s ===\nengine=%s  threads=%d  (median of %d run%s)\n", p->workload,
+                p->engine, p->threads, p->repeat, p->repeat == 1 ? "" : "s");
     fprintf(r->out, "%-7s %12s %10s %10s %10s %10s\n", "op", "count", "p50", "p99", "p99.9", "max");
     char b50[32], b99[32], b999[32], bmax[32];
     for (int i = 0; i < p->n_ops; i++)
@@ -83,15 +88,16 @@ static void tsv_point(reporter *r, const report_point *p)
     if (!t->header_done)
     {
         fprintf(r->out,
-                "workload\tengine\tthreads\tbatch\top\tcount"
+                "workload\tengine\tthreads\tsweep_param\tsweep_value\top\tcount"
                 "\tp50_ns\tp99_ns\tp999_ns\tmax_ns\thit_rate\twu_per_s\tops_per_s\n");
         t->header_done = 1;
     }
     for (int i = 0; i < p->n_ops; i++)
     {
         const report_op *o = &p->ops[i];
-        fprintf(r->out, "%s\t%s\t%d\t%d\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%.3f\t%.1f\t%.1f\n",
-                p->workload, p->engine, p->threads, p->batch, o->op, (unsigned long long)o->count,
+        fprintf(r->out, "%s\t%s\t%d\t%s\t%ld\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%.3f\t%.1f\t%.1f\n",
+                p->workload, p->engine, p->threads, p->sweep_param ? p->sweep_param : "",
+                p->sweep_param ? p->sweep_value : 1, o->op, (unsigned long long)o->count,
                 (unsigned long long)o->p50, (unsigned long long)o->p99, (unsigned long long)o->p999,
                 (unsigned long long)o->max, p->has_hit ? p->hit_rate : 0.0, p->wu_med, p->ops_med);
     }
@@ -103,12 +109,14 @@ static void timeline_sample(reporter *r, const report_sample *s)
     tsv_ctx *t = r->ctx;
     if (!t->header_done)
     {
-        fprintf(r->out, "workload\tengine\tthreads\tbatch\telapsed_s\tmetric\tvalue\n");
+        fprintf(r->out,
+                "workload\tengine\tthreads\tsweep_param\tsweep_value\telapsed_s\tmetric\tvalue\n");
         t->header_done = 1;
     }
     for (int i = 0; i < s->nm; i++)
-        fprintf(r->out, "%s\t%s\t%d\t%d\t%.3f\t%s\t%.3f\n", s->workload, s->engine, s->threads,
-                s->batch, s->elapsed_s, s->m[i].name, s->m[i].value);
+        fprintf(r->out, "%s\t%s\t%d\t%s\t%ld\t%.3f\t%s\t%.3f\n", s->workload, s->engine, s->threads,
+                s->sweep_param ? s->sweep_param : "", s->sweep_param ? s->sweep_value : 1,
+                s->elapsed_s, s->m[i].name, s->m[i].value);
     fflush(r->out);
 }
 

@@ -27,7 +27,8 @@ TIMELINE_FILE = "timeline.tsv"
 COL_WORKLOAD = "workload"
 COL_ENGINE = "engine"
 COL_THREADS = "threads"
-COL_BATCH = "batch"
+COL_SWEEP_PARAM = "sweep_param"
+COL_SWEEP_VALUE = "sweep_value"
 COL_OP = "op"
 COL_ELAPSED = "elapsed_s"
 COL_METRIC = "metric"
@@ -93,7 +94,8 @@ class Point:
     workload: str
     engine: str
     threads: int
-    batch: int
+    sweep_param: str
+    sweep_value: int
     wu_per_s: float
     ops_per_s: float
     hit_rate: float
@@ -109,11 +111,12 @@ def build_points(rows: list[dict[str, str]]) -> list[Point]:
         count += 1
         assert count <= len(rows) + 1, "point build exceeded its bound"
         threads = to_int(row[COL_THREADS])
-        batch = to_int(row[COL_BATCH])
-        key = (row[COL_WORKLOAD], row[COL_ENGINE], threads, batch)
+        sweep_value = to_int(row[COL_SWEEP_VALUE])
+        sweep_param = row.get(COL_SWEEP_PARAM, "")
+        key = (row[COL_WORKLOAD], row[COL_ENGINE], threads, sweep_value)
         point = by_key.get(key)
         if point is None:
-            point = Point(row[COL_WORKLOAD], row[COL_ENGINE], threads, batch,
+            point = Point(row[COL_WORKLOAD], row[COL_ENGINE], threads, sweep_param, sweep_value,
                           to_float(row[COL_WU]), to_float(row[COL_OPS]),
                           to_float(row[COL_HIT]))
             by_key[key] = point
@@ -140,9 +143,13 @@ def peak_threads(points: list[Point]) -> int:
     return max((p.threads for p in points), default=0)
 
 
-def baseline_batch(points: list[Point]) -> int:
+def baseline_value(points: list[Point], workload: str) -> int:
+    """The smallest swept value a workload ran at, its unbatched or smallest
+    record baseline. Used to pick one representative point per workload for the
+    throughput, scalability, and latency figures."""
     assert isinstance(points, list), "points must be a list"
-    return min((p.batch for p in points), default=1)
+    assert isinstance(workload, str), "workload must be a string"
+    return min((p.sweep_value for p in points if p.workload == workload), default=1)
 
 
 def point_value(points: list[Point], workload: str, engine: str) -> float:
@@ -158,7 +165,7 @@ def swept_workloads(points: list[Point]) -> list[str]:
     assert isinstance(points, list), "points must be a list"
     out = []
     for w in distinct([p.workload for p in points]):
-        if len({p.batch for p in points if p.workload == w}) > 1:
+        if len({p.sweep_value for p in points if p.workload == w}) > 1:
             out.append(w)
     return out
 
@@ -263,7 +270,8 @@ def plot_throughput_compare(points: list[Point], palette: dict[str, str],
     assert isinstance(points, list), "points must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
     top = peak_threads(points)
-    usable = [p for p in points if p.threads == top and p.batch == baseline_batch(points)]
+    usable = [p for p in points
+              if p.threads == top and p.sweep_value == baseline_value(points, p.workload)]
     workloads = distinct([p.workload for p in usable])
     engines = engines_of(usable)
     if not workloads or not engines:
@@ -287,7 +295,7 @@ def plot_scalability(points: list[Point], palette: dict[str, str], outdir: Path,
                      ext: str) -> Optional[Path]:
     assert isinstance(points, list), "points must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
-    usable = [p for p in points if p.batch == baseline_batch(points)]
+    usable = [p for p in points if p.sweep_value == baseline_value(points, p.workload)]
     workloads = distinct([p.workload for p in usable])
     if not workloads:
         return None
@@ -330,7 +338,8 @@ def plot_latency_compare(points: list[Point], pctl: str, palette: dict[str, str]
     assert isinstance(points, list), "points must be a list"
     assert isinstance(pctl, str), "pctl must be a string"
     top = peak_threads(points)
-    chosen = [p for p in points if p.threads == top and p.batch == baseline_batch(points)]
+    chosen = [p for p in points
+              if p.threads == top and p.sweep_value == baseline_value(points, p.workload)]
     workloads = distinct([p.workload for p in chosen])
     engines = engines_of(chosen)
     if not workloads or not engines:
@@ -343,32 +352,41 @@ def plot_latency_compare(points: list[Point], pctl: str, palette: dict[str, str]
     return save(fig, outdir, f"latency_{pctl.replace('.', '')}_compare", ext)
 
 
-def plot_batch(points: list[Point], palette: dict[str, str], outdir: Path,
-               ext: str) -> Optional[Path]:
+def plot_sweeps(points: list[Point], palette: dict[str, str], outdir: Path,
+                ext: str) -> list[Path]:
+    """One amortization figure per workload that sweeps a parameter, titled and
+    axis labeled by whatever that workload sweeps, batch size, value bytes, or
+    anything a future workload declares. Workloads that sweep nothing are skipped.
+    Each swept workload gets its own figure since the parameters are not
+    comparable across workloads."""
     assert isinstance(points, list), "points must be a list"
     assert isinstance(outdir, Path), "outdir must be a Path"
-    swept = swept_workloads(points)
-    if not swept:
-        return None
-    bpoints = [p for p in points if p.workload in swept]
-    threadset = sorted({p.threads for p in bpoints})
-    engines = engines_of(bpoints)
-    fig, axes = make_grid(len(threadset), "Batch amortization (ops per s)")
-    for ax, thr in zip(axes, threadset):
-        for engine in engines:
-            series = sorted((p.batch, p.ops_per_s) for p in bpoints
-                            if p.threads == thr and p.engine == engine)
-            if not series:
-                continue
-            ax.plot([b for b, _ in series], [v for _, v in series], marker="o",
-                    color=engine_color(engine, palette), label=engine)
-        ax.set_xscale("log", base=2)
-        ax.set_title(f"{thr} threads")
-        ax.set_xlabel("batch size")
-        ax.set_ylabel("ops per s")
-        ax.grid(True, alpha=GRID_ALPHA)
-        ax.legend(fontsize=LEGEND_FONTSIZE)
-    return save(fig, outdir, "batch_amortization", ext)
+    written: list[Path] = []
+    count = 0
+    for workload in swept_workloads(points):
+        count += 1
+        assert count <= len(points) + 1, "sweep figure loop exceeded its bound"
+        wpoints = [p for p in points if p.workload == workload]
+        param = next((p.sweep_param for p in wpoints if p.sweep_param), "sweep")
+        threadset = sorted({p.threads for p in wpoints})
+        engines = engines_of(wpoints)
+        fig, axes = make_grid(len(threadset), f"{workload}: ops per s vs {param}")
+        for ax, thr in zip(axes, threadset):
+            for engine in engines:
+                series = sorted((p.sweep_value, p.ops_per_s) for p in wpoints
+                                if p.threads == thr and p.engine == engine)
+                if not series:
+                    continue
+                ax.plot([b for b, _ in series], [v for _, v in series], marker="o",
+                        color=engine_color(engine, palette), label=engine)
+            ax.set_xscale("log", base=2)
+            ax.set_title(f"{thr} threads")
+            ax.set_xlabel(param)
+            ax.set_ylabel("ops per s")
+            ax.grid(True, alpha=GRID_ALPHA)
+            ax.legend(fontsize=LEGEND_FONTSIZE)
+        written.append(save(fig, outdir, f"sweep_{workload}", ext))
+    return written
 
 
 def plot_timeline(rows: list[dict[str, str]], palette: dict[str, str],
@@ -506,10 +524,10 @@ def main() -> int:
     results = [
         plot_throughput_compare(points, palette, outdir, ext),
         plot_scalability(points, palette, outdir, ext),
-        plot_batch(points, palette, outdir, ext),
         plot_timeline(timeline_rows, palette, outdir, ext),
         plot_timeline_system(timeline_rows, palette, outdir, ext),
     ]
+    results.extend(plot_sweeps(points, palette, outdir, ext))
     results.extend(plot_engine_stats(timeline_rows, palette, outdir, ext))
     for pctl in COMPARE_PCTLS:
         results.append(plot_latency_compare(points, pctl, palette, outdir, ext))

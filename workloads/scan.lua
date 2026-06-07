@@ -36,14 +36,19 @@ local function key(i)
   return format(KEY_FMT, i)
 end
 
+-- Seeding groups this many writes into one kv_mput. It belongs to the load
+-- phase, not the measured run, so it is fixed here like VALUE_BYTES rather than
+-- driven by a flag.
+local SEED_BATCH = 512
+
 -- Seeding is sharded across the worker threads and batched. Each thread writes
 -- the slice of the keyspace it owns, ctx.thread of every ctx.threads, grouping
--- ctx.batch keys into one kv_mput so a large seed is parallel and amortized.
+-- SEED_BATCH keys into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
   assert(type(ctx.items) == "number" and ctx.items >= 1, "ctx.items must be >= 1")
   assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
-  local b = max(1, ctx.batch)
+  local b = SEED_BATCH
   local buf = {}
   for j = 1, b do buf[j] = { key = "", val = VALUE } end
   local n = 0

@@ -2,8 +2,8 @@
 -- model how real stores amortise per operation overhead by grouping keys into one
 -- call, as with a RocksDB write batch, Redis pipelining, or a multi get. Each
 -- call records a single latency sample but performs ctx.batch underlying key
--- operations, so sweeping --batch traces the amortisation curve. A batch size of
--- one degrades to single key calls and gives the unbatched baseline.
+-- operations, so sweeping its own batch sizes traces the amortisation curve. A
+-- batch size of one degrades to single key calls and gives the unbatched baseline.
 
 local assert, type = assert, type
 local random, max = math.random, math.max
@@ -37,14 +37,18 @@ local function rnd(n)
   return random(0, n - 1)
 end
 
+-- Seeding groups this many writes into one kv_mput. This is the load phase, so
+-- it is fixed here and is independent of the batch sizes the run phase sweeps.
+local SEED_BATCH = 512
+
 -- Seeding is sharded across the worker threads and batched. Each thread writes
 -- the slice of the keyspace it owns, ctx.thread of every ctx.threads, grouping
--- ctx.batch keys into one kv_mput so a large seed is parallel and amortized.
+-- SEED_BATCH keys into one kv_mput so a large seed is parallel and amortized.
 local function load(ctx)
   assert(type(ctx) == "table", "ctx must be a table")
   assert(type(ctx.items) == "number" and ctx.items >= 1, "ctx.items must be >= 1")
   assert(type(ctx.threads) == "number" and ctx.threads >= 1, "ctx.threads must be >= 1")
-  local b = max(1, ctx.batch)
+  local b = SEED_BATCH
   local buf = {}
   for j = 1, b do buf[j] = { key = "", val = VALUE } end
   local n = 0
@@ -80,4 +84,7 @@ local function run(ctx)
   end
 end
 
-return { name = "batch", load = load, run = run, batched = true }
+-- batch sweeps its own parameter, the number of keys per mget/mput call. The
+-- harness iterates these values, injects each as ctx.batch, and labels the
+-- report column batch. No other workload reads it.
+return { name = "batch", load = load, run = run, sweep = { param = "batch", values = { 1, 64, 256, 512, 1024 } } }

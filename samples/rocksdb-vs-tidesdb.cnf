@@ -2,12 +2,6 @@
 # run it with ./keybench --config samples/rocksdb-vs-tidesdb.cnf
 # any CLI flag you also pass overrides the matching [bench] key here.
 #
-# Every engine knob keybench understands is listed below. The lines that are
-# active are the overrides this parity run applies. Everything else is shown
-# commented out next to its real default so the full tuning surface is visible.
-# A commented line is documentation only. keybench keeps the engine default for
-# it. Uncomment a line to override that default. Defaults shown here were read
-# from the installed libraries, rocksdb 11.1.1 and tidesdb 9.3.5.
 #
 # Sizes accept K M G T suffixes that mean powers of 1024. A bare number is bytes.
 # There is no B suffix. A value with no recognised suffix falls back to the
@@ -16,7 +10,6 @@
 [bench]
 backend  = rocksdb,tidesdb
 threads  = 1,8,16,32,64
-batch    = 1,64,256,512,1024
 repeat   = 3
 secs     = 900
 # near 100 GB each.
@@ -32,6 +25,7 @@ workload = workloads/mixed.lua
 workload = workloads/cart.lua
 workload = workloads/scan.lua
 workload = workloads/batch.lua
+workload = workloads/valsize.lua
 
 # keybench passes any key in this section straight to RocksDB as an option
 # string and sets only create_if_missing on its own. Any key RocksDB accepts in
