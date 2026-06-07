@@ -9,11 +9,17 @@
 
 [bench]
 backend  = rocksdb,tidesdb
-threads  = 1,8,16,32,64
-repeat   = 3
-secs     = 120
-items    = 25000
-users    = 45000
+threads  = 1,8,16,32
+repeat   = 2
+secs     = 60
+# items and users size the on disk dataset, about 2 GB per workload here, 16
+# times the 64M memtable and block cache so the run exercises sstables and
+# compaction rather than sitting in memory. The grid is about 130 cells, the
+# batch sweep being most of them, and lands near three hours on a spinning disk.
+# Raise items for a heavier dataset, repeat or secs for tighter or longer
+# measurements, both at a roughly linear cost in time.
+items    = 500000
+users    = 90000
 report_dir = ./results
 timeline = 1
 data_dir = /media/agpmastersystem/0e938ae2-7b41-437b-a5ac-a27e9f111a4e/bench
@@ -21,7 +27,6 @@ workload = workloads/mixed.lua
 workload = workloads/cart.lua
 workload = workloads/scan.lua
 workload = workloads/batch.lua
-workload = workloads/valsize.lua
 
 # keybench passes any key in this section straight to RocksDB as an option
 # string and sets only create_if_missing on its own. Any key RocksDB accepts in
