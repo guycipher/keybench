@@ -706,7 +706,8 @@ static kv_store *measure_setup(const char *path, const config *cfg, char *name_o
    the store, so seed once mode can run the timed phase many times against one
    seeded store. */
 static void measure_timed(const char *path, const config *cfg, kv_store *store, const char *name,
-                          const char *engine, reporter_set *reporters, point_result *R)
+                          const char *engine, reporter_set *reporters, point_result *R, int run_no,
+                          int run_of)
 {
     stats_reset(&R->stats);
     R->units = 0;
@@ -715,6 +716,18 @@ static void measure_timed(const char *path, const config *cfg, kv_store *store, 
     R->ok = 0;
 
     int nthreads = cfg->threads < 1 ? 1 : cfg->threads;
+    /* Mark the start of each timed run, so a new cell or repeat is obvious in the
+       scrolling output even when seed once skips the reseed that would otherwise
+       separate them. */
+    if (isatty(STDERR_FILENO))
+    {
+        char tag[48];
+        if (cfg->sweep_param)
+            snprintf(tag, sizeof tag, "t%d %s=%ld", nthreads, cfg->sweep_param, cfg->sweep_value);
+        else
+            snprintf(tag, sizeof tag, "t%d", nthreads);
+        fprintf(stderr, "  running %s on %s  %s  run %d/%d\n", name, engine, tag, run_no, run_of);
+    }
     worker *ws = calloc((size_t)nthreads, sizeof *ws);
     pthread_t *tids = calloc((size_t)nthreads, sizeof *tids);
     if (!ws || !tids)
@@ -806,7 +819,7 @@ static void measure_timed(const char *path, const config *cfg, kv_store *store, 
 }
 
 static void run_measurement(const char *path, const config *cfg, char *name_out, size_t name_sz,
-                            reporter_set *reporters, point_result *R)
+                            reporter_set *reporters, point_result *R, int run_no, int run_of)
 {
     char name[128] = "(unnamed)";
     const char *engine = NULL;
@@ -821,7 +834,7 @@ static void run_measurement(const char *path, const config *cfg, char *name_out,
         R->ok = 0;
         return;
     }
-    measure_timed(path, cfg, store, name, engine, reporters, R);
+    measure_timed(path, cfg, store, name, engine, reporters, R, run_no, run_of);
     store_close(store);
 }
 
@@ -1004,7 +1017,8 @@ static void run_file(const char *path, const config *base, const char *const *en
                     int ok = 1;
                     for (int r = 0; r < repeat; r++)
                     {
-                        measure_timed(path, &pc, store, name, engine, reporters, &Rs[r]);
+                        measure_timed(path, &pc, store, name, engine, reporters, &Rs[r], r + 1,
+                                      repeat);
                         if (!Rs[r].ok)
                         {
                             ok = 0;
@@ -1031,7 +1045,7 @@ static void run_file(const char *path, const config *base, const char *const *en
                 int ok = 1;
                 for (int r = 0; r < repeat; r++)
                 {
-                    run_measurement(path, &pc, name, sizeof name, reporters, &Rs[r]);
+                    run_measurement(path, &pc, name, sizeof name, reporters, &Rs[r], r + 1, repeat);
                     if (!Rs[r].ok)
                     {
                         ok = 0;
