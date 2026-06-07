@@ -7,8 +7,8 @@
 -- swept parameter need not be batch.
 --
 -- The dataset is items times the current value size, so the largest size times
--- items is the working set. Keep items modest when the sweep reaches into the
--- megabytes, or the big end will not fit the drive.
+-- items is the working set. Keep items modest, since the big end of the sweep
+-- multiplies items by a large value, or it will not fit the drive.
 
 local assert, type = assert, type
 local random = math.random
@@ -95,9 +95,9 @@ local function run(ctx)
   end
 end
 
--- valsize sweeps the value size from a small record to a one megabyte blob. The
--- harness iterates these, injects each as ctx.valuebytes, and labels the report
--- column valuebytes.
+-- valsize sweeps the value size from a small record up to a blob of hundreds of
+-- kilobytes. The harness iterates these, injects each as ctx.valuebytes, and
+-- labels the report column valuebytes.
 return {
   name = "valsize",
   load = load,

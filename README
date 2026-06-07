@@ -170,29 +170,29 @@ Live progress
 
 Both phases of a point stream to stderr once a second, so a long point looks
 alive rather than hung. The seed phase prints a line per second, the keys written
-so far and the current rate, then a done line with the total. The timed phase
-then prints its own line per second, each its own line so the output scrolls as a
-log rather than rewriting one spot. The seed of a large dataset is itself worth
-watching.
+so far and the current rate, then a done line with the total keys and the rate it
+averaged. The timed phase then prints its own line per second, each its own line
+so the output scrolls as a log rather than rewriting one spot. The seed of a
+large dataset is itself worth watching.
 
   seeding cart on rocksdb 11.1.1 with 8 threads
-  seeding cart rocksdb 11.1.1    1.0s        193024 keys      192349 keys/s
-  seeding cart rocksdb 11.1.1    2.0s        402944 keys      209217 keys/s
-  seeding cart rocksdb 11.1.1    3.0s        565760 keys      162202 keys/s
-  seeded cart in 10.0s
+  seeding cart rocksdb 11.1.1    1.0s        203264 keys      202498 keys/s
+  seeding cart rocksdb 11.1.1    2.0s        382464 keys      178539 keys/s
+  seeding cart rocksdb 11.1.1    3.0s        440832 keys       58099 keys/s
+  seeded cart in 9.5s  823657 keys  87100 keys/s
 
 A time bounded point shows the elapsed and budget seconds and the current rate.
 
-  cart rocksdb 11.1.1 t8    1.0/6s      57632 wu/s
-  cart rocksdb 11.1.1 t8    2.0/6s     182627 wu/s
-  cart rocksdb 11.1.1 t8    3.0/6s      39907 wu/s
+  cart rocksdb 11.1.1 t8    1.0/6s     166232 wu/s
+  cart rocksdb 11.1.1 t8    2.0/6s     132322 wu/s
+  cart rocksdb 11.1.1 t8    3.0/6s      11561 wu/s
 
 A count bounded point shows the elapsed seconds, the rate, and the percent of the
 op budget done.
 
-  mixed rocksdb 11.1.1 t1    1.0s      24057 wu/s   10% (24143/250000)
-  mixed rocksdb 11.1.1 t1    2.0s      22644 wu/s   19% (46865/250000)
-  mixed rocksdb 11.1.1 t1    3.0s      23500 wu/s   28% (70453/250000)
+  mixed rocksdb 11.1.1 t1    1.0s      23951 wu/s   10% (24035/250000)
+  mixed rocksdb 11.1.1 t1    2.0s      23355 wu/s   19% (47477/250000)
+  mixed rocksdb 11.1.1 t1    3.0s      22918 wu/s   28% (70479/250000)
 
 When a workload sweeps a parameter, its current value joins the label, as
 t8 batch=256. The status goes to stderr and only when stderr is a terminal, so it
@@ -225,6 +225,7 @@ ran.
 
   --backend L    one engine, or a comma list to compare. e.g. skiplist,rocksdb
   --threads L    one thread count, or a comma list to sweep. e.g. 1,2,4,8
+  --seed-threads N  threads that seed the dataset, 0 the default meaning use --threads
   --repeat N     run each point N times and report the median.
 
 These two grid knobs are global because they are true of every run, the engine
@@ -235,7 +236,13 @@ sweeps the key count per call, the valsize workload sweeps the value size, and a
 plain workload sweeps nothing and just runs the engine and thread grid. So the
 grid is engines times thread counts times whatever the workload itself sweeps.
 Each cell is run --repeat times and reduced to a median, which damps the noise of
-a single run. An example that compares two engines as they scale.
+a single run.
+
+The seed phase that fills each cell uses the run thread count by default, so a
+thread sweep seeds each cell at its own concurrency. --seed-threads overrides
+that, seeding every cell with that many threads regardless of its run threads, so
+a one thread run cell need not also seed single threaded. An example that
+compares two engines as they scale.
 
   ./keybench --backend skiplist,rocksdb --threads 1,4,16 --repeat 3 \
              --data-dir /mnt/disk workloads/mixed.lua
@@ -262,8 +269,10 @@ file.
 console prints the human report above. tsv writes one row per operation per
 grid point, ready for a spreadsheet or plot. timeline writes one row per live
 sample, one metric per row, so you can watch throughput, CPU, resident memory,
-disk bytes, and engine internals evolve over the run. The timeline sink only
-produces rows when --timeline names an interval.
+disk bytes, and engine internals evolve over the run. Each row is tagged seed or
+run in a phase column, since the load phase is sampled too, its ingest rate as
+the data lands, so the seed plots over time the way the timed run does. The
+timeline sink only produces rows when --timeline names an interval.
 
 --report-dir is the convenient whole. It stamps a fresh directory, writes the
 console report, the points tsv, the timeline tsv, and a replay config into it,
@@ -347,9 +356,10 @@ engine list, the thread list, and whatever parameter the workload itself sweeps,
 and keybench runs that grid once per workload file, in the order the files are
 given. Each cell of the grid
 is measured --repeat times and reduced to a median. Every measurement opens a
-fresh engine store in its own temporary directory under --data-dir, runs the
-untimed load to seed it, runs the timed phase, then tears the store down, so no
-two measurements share state. Worker thread t seeds its RNG with seed plus t,
+fresh engine store in its own temporary directory under --data-dir, runs the load
+to seed it, runs the timed phase, then tears the store down, so no two
+measurements share state. The load is not the measured phase, its ingest is
+reported on its own, but it is what fills the store before the run. Worker thread t seeds its RNG with seed plus t,
 and the repeats of a cell reuse the same seeds, so --repeat measures run to run
 noise rather than seed variance.
 
@@ -388,7 +398,7 @@ runs once over the thread grid.
 Sweep the value size. valsize declares a sweep over its record size the same way,
 so the curve shows how an engine responds as values grow into large blobs.
 
-  ./keybench --backend rocksdb --secs 20 --items 200000 --data-dir /mnt/disk workloads/valsize.lua
+  ./keybench --backend rocksdb --secs 20 --items 50000 --data-dir /mnt/disk workloads/valsize.lua
 
 A full grid with repeats. Two engines by four thread counts is eight cells, each
 run three times and reduced to a median, with a summary table at the end.
@@ -439,11 +449,12 @@ Plotting
 
 scripts/plot.py renders the tsv artifacts of one or more result directories
 into figures, throughput bars, scalability curves, one amortization curve per
-workload that sweeps a parameter labeled by whatever it sweeps, latency
-percentiles, and the live timelines. The system timeline figure carries every
-metric the system probe records, and the engine internals are drawn one figure
-per engine, since RocksDB and TidesDB report different metric names and so never
-share a panel. Every metric an engine emits gets a panel, including the ones
+workload that sweeps a parameter labeled by whatever it sweeps, latency against
+thread count per workload with a panel per op, the seed loading progress as
+cumulative keys over time, and the live timelines. The system timeline figure
+carries every metric the system probe records, and the engine internals are
+drawn one figure per engine, since RocksDB and TidesDB report different metric
+names and so never share a panel. Every metric an engine emits gets a panel, including the ones
 that stay flat or zero for the whole run, since a constant is itself a fact
 worth seeing. Engine colors come from the BACKENDPALETTE file.
 
@@ -535,9 +546,10 @@ The bundled workloads are worth reading as patterns.
           number of keys per call, so its curve is the amortization curve. Reads
           items as its keyspace and ignores users.
   valsize the mixed blend run across a sweep of value sizes, from a small record
-          to a one megabyte blob. Declares a sweep over ctx.valuebytes and stores
-          values of that size, so its curve shows how an engine handles growing
-          records. Reads items as its keyspace and ignores users.
+          up to a large blob of hundreds of kilobytes. Declares a sweep over
+          ctx.valuebytes and stores values of that size, so its curve shows how an
+          engine handles growing records. Reads items as its keyspace and ignores
+          users.
 
 
 The kv verb set
