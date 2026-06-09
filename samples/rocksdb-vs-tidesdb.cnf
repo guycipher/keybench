@@ -50,9 +50,9 @@ compression = kNoCompression
 block_based_table_factory = {block_cache=64M;cache_index_and_filter_blocks=true;filter_policy=bloomfilter:10:false}
 write_buffer_size = 64M
 max_background_jobs = 8
-level0_slowdown_writes_trigger = 10
-level0_file_num_compaction_trigger = 6
-level0_stop_writes_trigger = 20
+level0_slowdown_writes_trigger = 5
+level0_file_num_compaction_trigger = 4
+level0_stop_writes_trigger = 10
 
 # Reference, RocksDB column family and write path defaults.
 # write_buffer_size = 64M                  # memtable size before it flushes
@@ -107,13 +107,14 @@ enable_bloom_filter = 1
 bloom_fpr = 0.01
 write_buffer_size = 64M
 block_cache_size = 64M
-num_flush_threads = 4
+num_flush_threads = 0
 num_compaction_threads = 4
-# 20 is max, graduated
-l0_queue_stall_threshold = 20
-l1_file_count_trigger = 6
-max_open_sstables = 65536
+# 10 is max, graduated
+l0_queue_stall_threshold = 10
+l1_file_count_trigger = 4
+max_open_sstables = 0
 sync_mode = none
+log_level = none
 
 # Reference, tidesdb database defaults.
 # num_flush_threads = 0                     # 0 resolves to one per cpu at open
