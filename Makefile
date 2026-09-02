@@ -24,7 +24,7 @@ CFLAGS += -DKEYBENCH_VERSION='"$(KB_VERSION)"'
 
 # Core sources, the ones that do not depend on any particular engine.
 SRC     := src/main.c src/hist.c src/kvlua.c src/store.c src/reporter.c src/registry.c src/config.c \
-           src/probe.c src/probe_system.c src/probe_build.c
+           src/probe.c src/probe_system.c src/probe_build.c src/affinity.c
 
 # Which backends to compile in. Each backend has a backend.mk that appends its
 # own sources, compiler flags, and libraries. The ROCKSDB=1 and TIDESDB=1

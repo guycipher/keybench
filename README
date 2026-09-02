@@ -104,6 +104,40 @@ works.
   make TIDESDB=1 TIDESDB_CFLAGS=-I/opt/tidesdb/include TIDESDB_LIBS="-L/opt/tidesdb/lib -ltidesdb"
   make ROCKSDB=1 TIDESDB=1 ALLOC=jemalloc
 
+A whole install is usually easier named at once. ROCKSDB_PREFIX and TIDESDB_PREFIX
+each derive the compiler flags, the libraries, and the version header from one
+directory, and link an rpath to it.
+
+  make ROCKSDB=1 TIDESDB=1 ALLOC=jemalloc \
+       ROCKSDB_PREFIX=~/engines/rocksdb-11.8.1 \
+       TIDESDB_PREFIX=~/engines/tidesdb-2026-09-02
+
+The rpath is the part that matters. A -L only steers the link, so without it the
+loader searches its own cache at run time and can hand the process a different
+build of the same soname than the headers described, and the report then names a
+version that never ran. TidesDB makes this easy to hit because every build carries
+the same soname. A prefix must be self contained, holding both include/ and lib/;
+a distro layout such as /usr keeps its libraries in lib/<triplet> and is rejected
+at configure time rather than linked against by accident.
+
+  make verify
+
+prints what the binary actually resolves to and the version each backend reports.
+Run it after any prefix build, since that is the only way to be sure the thing you
+measured is the thing you meant to measure.
+
+scripts/install_rocksdb.sh and scripts/install_tidesdb.sh build either engine from
+source into a prefix of your choosing, which is what lets several versions sit
+side by side and be compared. Both take --prefix, and each finishes by printing
+the make line for what it just installed.
+
+  scripts/install_tidesdb.sh --with-jemalloc --prefix ~/engines/tidesdb-2026-09-02
+  scripts/install_rocksdb.sh --with-jemalloc --branch v11.8.1 --prefix ~/engines/rocksdb-11.8.1
+
+--ref on the tidesdb script and --branch on the rocksdb one pin a tag, branch, or
+commit. Give both engines the same allocator, since one built against jemalloc and
+one against the system allocator is not a like for like comparison.
+
 To build against a system Lua instead of the vendored copy.
 
   make LUA_SYS=1
@@ -208,12 +242,25 @@ Choosing the work
   --users N      size of the user population a workload may address.
   --items N      size of the catalog a workload may address.
   --seed N       base RNG seed. Thread t uses seed plus t.
+  --pin          pin worker t to the t-th cpu of the inherited cpu set.
 
 These split into two kinds. --ops and --secs are the two ways to bound a run and
 you use one of them, since giving --secs clears the op count and runs the clock.
 --users, --items, and --seed are not a choice between, they always apply, each
 handed to the workload through ctx to size its population, size its catalog, and
 seed its RNG. So a run is one bound flag plus any of the three knobs at once.
+
+--pin is separate from both. By default the harness leaves placement to the
+scheduler, which is what a real service gets and so is the honest default, but it
+also lets a worker migrate mid run and lose its warm caches, which is one of the
+things that makes a cell's repeats disagree. Pinning takes that variable out, so a
+spread that survives it belongs to the engine rather than to placement. The set is
+the one the process inherited rather than every cpu on the machine, so a run under
+taskset, a cpuset cgroup, or a container limit pins inside that allowance instead
+of escaping it, and worker t takes the t-th cpu of it. More threads than cpus wrap,
+so 64 threads on 16 allowed cpus put four workers on each, evenly and repeatably.
+The seed threads are pinned the same way, and the choice is recorded in the report
+and in the replay config, so a pinned run replays pinned.
 
 
 Sweeping and comparing
@@ -300,7 +347,8 @@ Probes
 
 A probe records context the benchmark itself does not produce. The system probe
 reports the host, CPU, memory, free disk, and the device, mount, filesystem, and
-solid state or rotational nature of the drive backing --data-dir, and samples
+solid state or rotational nature of the drive backing --data-dir, records the cpu
+set the run inherited and whether workers were pinned to it, and samples
 CPU percent, resident memory, load, faults, and IO while the run proceeds. The
 build probe reports the keybench version, compiler, and allocator.
 
@@ -659,8 +707,9 @@ Source layout
     reporter.c    console, tsv, and timeline sinks
     config.c      the INI config parser
     probe_*.c     the system and build probes
+    affinity.c    worker cpu pinning against the inherited cpu set
   backends/       one directory per engine
   workloads/      the bundled Lua workloads
-  scripts/        plot.py and the Lua fetch helper
+  scripts/        plot.py, the engine installers, and the Lua fetch helper
   samples/        an example config
   vendor/         the vendored Lua sources

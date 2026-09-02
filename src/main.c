@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "backend_registry.h"
+#include "affinity.h"
 #include "bench.h"
 #include "config.h"
 #include "hist.h"
@@ -117,6 +118,12 @@ typedef struct
        run against a store the earlier ones already churned, so it measures a
        steady state rather than a fresh dataset per cell. Off by default. */
     int seed_once;
+    /* Pin worker t to the t-th CPU of the set the process inherited. Off by
+       default: leaving placement to the scheduler is what a real service gets, and
+       is the honest default. Turn it on to take migration out of the picture when
+       a cell's repeats disagree and you need to know whether that is the engine or
+       the scheduler moving work off its warm caches. */
+    int pin;
     /* A workload may sweep a parameter of its own. sweep_param names it and
        sweep_value is the current point, set per cell by run_file. NULL means the
        workload sweeps nothing. */
@@ -226,6 +233,9 @@ static void *worker_main(void *arg)
 {
     worker *w = arg;
     const config *cfg = w->cfg;
+    /* Before the Lua state, the store handle, or any allocation, so everything
+       this worker touches is laid down on the CPU it will run on. */
+    if (cfg->pin) kb_pin_self(w->tid);
     w->kc.store = w->store;
     stats_reset(&w->kc.stats);
 
@@ -473,6 +483,7 @@ typedef struct
 static void *load_worker_main(void *arg)
 {
     load_worker *w = arg;
+    if (w->cfg->pin) kb_pin_self(w->tid);
     w->kc.store = w->store;
     stats_reset(&w->kc.stats);
     lua_State *L = open_workload(w->path, &w->kc, w->cfg->seed + (unsigned)w->tid);
@@ -1211,6 +1222,7 @@ static void apply_config(const cfg_file *conf, config *cfg, const char **threads
     cfg->seed = (unsigned)kv_opt_int(b, "seed", cfg->seed);
     cfg->seed_threads = (int)kv_opt_int(b, "seed_threads", cfg->seed_threads);
     cfg->seed_once = (int)kv_opt_int(b, "seed_once", cfg->seed_once);
+    cfg->pin = (int)kv_opt_int(b, "pin", cfg->pin);
     *repeat = (int)kv_opt_int(b, "repeat", *repeat);
     *ncfiles = kv_opt_all(b, "workload", cfiles, maxfiles);
 }
@@ -1233,6 +1245,7 @@ static void save_config(const char *path, const config *cfg, const char *engines
     fprintf(f, "threads = %s\n", threads_list);
     if (cfg->seed_threads > 0) fprintf(f, "seed_threads = %d\n", cfg->seed_threads);
     if (cfg->seed_once) fprintf(f, "seed_once = 1\n");
+    if (cfg->pin) fprintf(f, "pin = 1\n");
     if (cfg->secs > 0)
         fprintf(f, "secs = %g\n", cfg->secs);
     else
@@ -1368,6 +1381,7 @@ static void usage(const char *p)
         "  --secs S     run each workload for S seconds instead of a fixed count\n"
         "  --threads L  worker-thread counts; a comma list sweeps (e.g. 1,2,4,8) (default 1)\n"
         "  --seed-threads N  threads used to seed the dataset (default 0, meaning use --threads)\n"
+        "  --pin        pin worker t to the t-th cpu of the inherited cpu set\n"
         "  --seed-once  seed once per engine and swept value, reuse across the thread sweep and "
         "repeats\n"
         "  --repeat N   run each point N times and report the median (default 1)\n"
@@ -1398,6 +1412,7 @@ int main(int argc, char **argv)
                   .items = 100000,
                   .seed = 1,
                   .threads = 1,
+                  .pin = 0,
                   .backend = NULL,
                   .data_dir = NULL,
                   .conf = NULL};
@@ -1440,6 +1455,8 @@ int main(int argc, char **argv)
             threads_arg = argv[++i];
         else if (!strcmp(argv[i], "--seed-threads") && i + 1 < argc)
             cfg.seed_threads = (int)arg_long("--seed-threads", argv[++i]);
+        else if (!strcmp(argv[i], "--pin"))
+            cfg.pin = 1;
         else if (!strcmp(argv[i], "--seed-once"))
             cfg.seed_once = 1;
         else if (!strcmp(argv[i], "--repeat") && i + 1 < argc)
@@ -1612,6 +1629,15 @@ int main(int argc, char **argv)
         .nworkloads = nwl,
     };
     reporters_run(&reporters, &run);
+    /* Enumerate the inherited CPU set once, before any worker spawns, so every
+       thread pins against the same list and the probe can report what was used.
+       Enumerating even when pinning is off keeps the set in the report, which is
+       worth having when a run was confined by taskset or a cpuset without anyone
+       recording it. */
+    if (kb_affinity_init(cfg.pin) == 0 && cfg.pin)
+        fprintf(stderr, "keybench: warning, --pin requested but cpu affinity is unavailable here, "
+                        "running unpinned\n");
+
     probe_set_data_dir(cfg.data_dir);
     emit_probes(&reporters);
 
