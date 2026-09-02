@@ -3,6 +3,18 @@
 # TidesDB Installation Script
 # This script installs TidesDB from source
 # Usage: ./install_tidesdb.sh [--with-mimalloc] [--with-tcmalloc] [--with-sanitizer]
+#                             [--prefix <dir>] [--ref <branch|tag|commit>]
+#
+# TidesDB stamps every build as the same soname, so installing into /usr/local
+# overwrites the previous one and it cannot be recovered or re-measured. --prefix
+# gives each build its own directory so they coexist and can be benchmarked
+# against each other, and --ref pins which revision gets built:
+#
+#   ./install_tidesdb.sh --prefix /opt/engines/tidesdb-2026-09-02
+#   ./install_tidesdb.sh --ref v10.0.0 --prefix /opt/engines/tidesdb-10.0.0
+#
+# then build keybench against whichever one you want (the script prints the
+# command when it finishes).
 
 set -e  # Exit on error
 
@@ -10,17 +22,31 @@ set -e  # Exit on error
 USE_MIMALLOC=false
 USE_TCMALLOC=false
 USE_SANITIZER=false
+PREFIX=""
+REF=""
 
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+    arg="$1"
     case $arg in
         --with-mimalloc)
             USE_MIMALLOC=true
+            shift
             ;;
         --with-tcmalloc)
             USE_TCMALLOC=true
+            shift
             ;;
         --with-sanitizer)
             USE_SANITIZER=true
+            shift
+            ;;
+        --prefix)
+            PREFIX="$2"
+            shift 2
+            ;;
+        --ref)
+            REF="$2"
+            shift 2
             ;;
         --help|-h)
             echo "Usage: ./install_tidesdb.sh [OPTIONS]"
@@ -29,6 +55,8 @@ for arg in "$@"; do
             echo "  --with-mimalloc    Build with mimalloc memory allocator"
             echo "  --with-tcmalloc    Build with tcmalloc memory allocator (Google perftools)"
             echo "  --with-sanitizer   Build with AddressSanitizer and UBSan"
+            echo "  --prefix DIR       Install here instead of /usr/local, so builds coexist"
+            echo "  --ref REF          Build this branch, tag, or commit (default: latest tag)"
             echo "  --help, -h         Show this help message"
             exit 0
             ;;
@@ -40,8 +68,19 @@ for arg in "$@"; do
     esac
 done
 
+# These scripts live in keybench/scripts, so the keybench root is one level up.
+# That is what the build hints below are printed against.
+KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+INSTALL_PREFIX="${PREFIX:-/usr/local}"
+SYSTEM_INSTALL=false
+case "$INSTALL_PREFIX" in
+    /usr/local|/usr|/usr/local/) SYSTEM_INSTALL=true ;;
+esac
+
 echo "========================================="
 echo "TidesDB Installation Script"
+echo "(prefix: $INSTALL_PREFIX)"
 if [ "$USE_MIMALLOC" = true ]; then
     echo "(with mimalloc support)"
 fi
@@ -53,11 +92,19 @@ if [ "$USE_SANITIZER" = true ]; then
 fi
 echo "========================================="
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then 
+# Root is needed for a system prefix and for apt-get, but not for a prefix you own.
+if [ "$EUID" -ne 0 ]; then
     SUDO="sudo"
 else
     SUDO=""
+fi
+INSTALL_SUDO="$SUDO"
+if [ "$SYSTEM_INSTALL" = false ]; then
+    mkdir -p "$INSTALL_PREFIX" 2>/dev/null || true
+    if [ -w "$INSTALL_PREFIX" ]; then
+        INSTALL_SUDO=""
+        echo "Installing into $INSTALL_PREFIX without sudo (you own it)"
+    fi
 fi
 
 # Detect number of CPU cores
@@ -105,12 +152,19 @@ fi
 git clone https://github.com/tidesdb/tidesdb.git
 cd tidesdb
 
-# Get the latest release tag
-echo "Fetching latest release..."
-LATEST_TAG=$(git describe --tags `git rev-list --tags --max-count=1`)
-echo "Latest TidesDB version: $LATEST_TAG"
-
-git checkout $LATEST_TAG
+# Check out the requested revision, or the latest release tag
+if [ -n "$REF" ]; then
+    echo "Checking out: $REF"
+    git checkout "$REF"
+    LATEST_TAG="$REF"
+else
+    echo "Fetching latest release..."
+    LATEST_TAG=$(git describe --tags `git rev-list --tags --max-count=1`)
+    echo "Latest TidesDB version: $LATEST_TAG"
+    git checkout $LATEST_TAG
+fi
+# The soname is the same for every build, so record what this one actually is.
+BUILT_FROM="$(git rev-parse --short HEAD)"
 
 # Build TidesDB
 echo "Building TidesDB using $CPU_CORES parallel jobs..."
@@ -121,6 +175,7 @@ cd build
 # Configure CMake options
 CMAKE_OPTIONS=(
     -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX"
     -DTIDESDB_BUILD_TESTS=OFF
 )
 
@@ -150,12 +205,16 @@ cmake .. "${CMAKE_OPTIONS[@]}"
 make -j${CPU_CORES}
 
 # Install TidesDB
-echo "Installing TidesDB..."
-$SUDO make install
+echo "Installing TidesDB into $INSTALL_PREFIX..."
+$INSTALL_SUDO make install
 
-# Update library cache
-echo "Updating library cache..."
-$SUDO ldconfig
+# Record the revision beside the library, since the soname cannot distinguish builds.
+echo "$LATEST_TAG $BUILT_FROM $(date -Is)" | $INSTALL_SUDO tee "$INSTALL_PREFIX/lib/tidesdb.build-info" >/dev/null 2>&1 || true
+
+if [ "$SYSTEM_INSTALL" = true ]; then
+    echo "Updating library cache..."
+    $SUDO ldconfig
+fi
 
 # Verify installation
 echo ""
@@ -180,19 +239,28 @@ else
 fi
 echo "Compiled using: $CPU_CORES parallel jobs"
 echo ""
-echo "Library location: /usr/local/lib"
-echo "Header location: /usr/local/include/tidesdb"
+echo "Library location: $INSTALL_PREFIX/lib"
+echo "Header location: $INSTALL_PREFIX/include/tidesdb"
+echo "Built from: $LATEST_TAG ($BUILT_FROM)"
+echo ""
+echo "Build keybench against this install with:"
+echo "  make -C $KB_ROOT TIDESDB=1 \\"
+echo "    TIDESDB_CFLAGS=-I$INSTALL_PREFIX/include \\"
+echo "    TIDESDB_LIBS=\"-L$INSTALL_PREFIX/lib -Wl,-rpath,$INSTALL_PREFIX/lib -ltidesdb\""
+echo "or, equivalently:"
+echo "  make -C $KB_ROOT TIDESDB=1 TIDESDB_PREFIX=$INSTALL_PREFIX"
+echo "then confirm what it actually loads with:  make -C $KB_ROOT verify"
 echo ""
 echo "To verify the installation, you can check:"
-echo "  ldconfig -p | grep tidesdb"
+echo "  ls -l $INSTALL_PREFIX/lib/libtidesdb.so*"
 if [ "$USE_SANITIZER" = true ]; then
-    echo "  nm /usr/local/lib/libtidesdb.so | grep asan"
+    echo "  nm $INSTALL_PREFIX/lib/libtidesdb.so | grep asan"
 fi
 if [ "$USE_MIMALLOC" = true ]; then
-    echo "  ldd /usr/local/lib/libtidesdb.so | grep mimalloc"
+    echo "  ldd $INSTALL_PREFIX/lib/libtidesdb.so | grep mimalloc"
 fi
 if [ "$USE_TCMALLOC" = true ]; then
-    echo "  ldd /usr/local/lib/libtidesdb.so | grep tcmalloc"
+    echo "  ldd $INSTALL_PREFIX/lib/libtidesdb.so | grep tcmalloc"
 fi
 echo ""
 
@@ -202,3 +270,12 @@ echo "Cleaning up temporary files..."
 rm -rf tidesdb
 
 echo "Installation finished successfully!"
+echo ""
+echo "Usage tips:"
+echo "  $0 --prefix ~/engines/tidesdb-$(date +%Y-%m-%d)"
+echo "                                    every build carries the same soname, so a"
+echo "                                    prefix per build is what keeps the previous"
+echo "                                    one runnable and re-measurable"
+echo "  $0 --ref v10.0.0 --prefix ~/engines/tidesdb-10.0.0"
+echo "                                    pin a tag, branch, or commit"
+echo "  make -C $KB_ROOT TIDESDB=1 TIDESDB_PREFIX=<dir> && make -C $KB_ROOT verify"
