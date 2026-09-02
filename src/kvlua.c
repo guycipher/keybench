@@ -26,7 +26,7 @@ void stats_reset(op_stats *s)
 {
     for (int i = 0; i < OP__COUNT; i++) hist_reset(&s->h[i]);
     s->prim_ops = 0;
-    s->get_hits = s->get_misses = 0;
+    s->get_hits = s->get_misses = s->get_errors = 0;
 }
 
 void stats_merge(op_stats *dst, const op_stats *src)
@@ -35,6 +35,7 @@ void stats_merge(op_stats *dst, const op_stats *src)
     dst->prim_ops += src->prim_ops;
     dst->get_hits += src->get_hits;
     dst->get_misses += src->get_misses;
+    dst->get_errors += src->get_errors;
 }
 
 const char *op_name(int op)
@@ -95,7 +96,7 @@ static int l_get(lua_State *L)
     int found = store_get(kc->store, k, klen, &vp, &vlen);
     hist_record(&kc->stats.h[OP_GET], now_ns() - t0);
     KV_RELAXED_ADD(kc->stats.prim_ops, 1);
-    if (found)
+    if (found > 0)
     {
         lua_pushlstring(L, vp, vlen);
         free(vp);
@@ -104,7 +105,10 @@ static int l_get(lua_State *L)
     else
     {
         lua_pushnil(L);
-        kc->stats.get_misses++;
+        if (found < 0)
+            kc->stats.get_errors++;
+        else
+            kc->stats.get_misses++;
     }
     return 1;
 }
@@ -259,7 +263,7 @@ static int l_mget(lua_State *L)
     lua_createtable(L, n, 0);
     for (int i = 0; i < n; i++)
     {
-        if (found[i])
+        if (found[i] > 0)
         {
             lua_pushlstring(L, vp[i], vl[i]);
             kc->stats.get_hits++;
@@ -268,7 +272,10 @@ static int l_mget(lua_State *L)
         else
         {
             lua_pushnil(L);
-            kc->stats.get_misses++;
+            if (found[i] < 0)
+                kc->stats.get_errors++;
+            else
+                kc->stats.get_misses++;
         }
         lua_rawseti(L, -2, i + 1);
     }

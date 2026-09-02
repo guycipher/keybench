@@ -56,6 +56,9 @@ static void console_point(reporter *r, const report_point *p)
     }
     if (p->has_hit)
         fprintf(r->out, "get hit rate: %.1f%%%s\n", p->hit_rate, p->repeat > 1 ? " (median)" : "");
+    if (p->has_err)
+        fprintf(r->out, "get error rate: %.1f%%%s\n", p->err_rate,
+                p->repeat > 1 ? " (median)" : "");
     if (p->ops_med == p->wu_med)
     {
         /* Each workload unit is exactly one primitive op (no checkout fan-out or
@@ -89,17 +92,19 @@ static void tsv_point(reporter *r, const report_point *p)
     {
         fprintf(r->out,
                 "workload\tengine\tthreads\tsweep_param\tsweep_value\top\tcount"
-                "\tp50_ns\tp99_ns\tp999_ns\tmax_ns\thit_rate\twu_per_s\tops_per_s\n");
+                "\tp50_ns\tp99_ns\tp999_ns\tmax_ns\thit_rate\terr_rate\twu_per_s\tops_per_s\n");
         t->header_done = 1;
     }
     for (int i = 0; i < p->n_ops; i++)
     {
         const report_op *o = &p->ops[i];
-        fprintf(r->out, "%s\t%s\t%d\t%s\t%ld\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%.3f\t%.1f\t%.1f\n",
+        fprintf(r->out,
+                "%s\t%s\t%d\t%s\t%ld\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%.3f\t%.3f\t%.1f\t%.1f\n",
                 p->workload, p->engine, p->threads, p->sweep_param ? p->sweep_param : "",
                 p->sweep_param ? p->sweep_value : 1, o->op, (unsigned long long)o->count,
                 (unsigned long long)o->p50, (unsigned long long)o->p99, (unsigned long long)o->p999,
-                (unsigned long long)o->max, p->has_hit ? p->hit_rate : 0.0, p->wu_med, p->ops_med);
+                (unsigned long long)o->max, p->has_hit ? p->hit_rate : 0.0,
+                p->has_err ? p->err_rate : 0.0, p->wu_med, p->ops_med);
     }
     fflush(r->out);
 }

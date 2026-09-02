@@ -87,6 +87,19 @@ else
 	$(CC) $(CFLAGS) -I$(LUA_DIR) -Isrc $(SRC) $(LUA_LIB) -o $@ $(LDLIBS)
 endif
 
+# What the binary will actually load, which is the thing worth checking: a build
+# can link against one prefix and still resolve to another, and then the report
+# names a version that never ran.
+.PHONY: verify
+verify: $(BIN)
+	@echo "=== resolved at runtime ==="
+	@ldd ./$(BIN) | grep -E "rocksdb|tidesdb|jemalloc|tcmalloc" || echo "  (no engine libs linked)"
+	@echo "=== versions the binary reports ==="
+	@for e in rocksdb tidesdb; do \
+	  ./$(BIN) --backend $$e --ops 1 --threads 1 --probe none --data-dir $${TMPDIR:-/tmp} \
+	    workloads/mixed.lua 2>/dev/null | grep -oE "engine=$$e [0-9.]+" | head -1; \
+	done
+
 .PHONY: run all-wl clean
 run: $(BIN)
 	./$(BIN) workloads/cart.lua
@@ -96,3 +109,4 @@ all-wl: $(BIN)
 
 clean:
 	rm -f $(BIN) vendor/*.o vendor/liblua.a
+	rm -rf .build

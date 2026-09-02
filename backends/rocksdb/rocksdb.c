@@ -101,7 +101,7 @@ static int rdb_get(void *ctx, const char *k, size_t klen, const char **vp, size_
     {
         fprintf(stderr, "rocksdb get: %s\n", err);
         free(err);
-        return 0;
+        return KV_ERR;
     }
     if (!v) return 0;
     char *c = xmalloc(vl);

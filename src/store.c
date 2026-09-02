@@ -90,7 +90,7 @@ int store_get(kv_store *s, const char *k, size_t klen, char **vp, size_t *vlen)
     const char *bv;
     size_t bl;
     int found = s->be->get(s->be->ctx, k, klen, &bv, &bl);
-    if (found)
+    if (found > 0)
     {
         *vp = (char *)bv;
         *vlen = bl;

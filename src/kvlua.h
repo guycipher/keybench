@@ -25,6 +25,7 @@ typedef struct
     uint64_t prim_ops;
     uint64_t get_hits;
     uint64_t get_misses;
+    uint64_t get_errors;
 } op_stats;
 
 typedef struct

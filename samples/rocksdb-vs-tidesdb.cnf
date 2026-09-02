@@ -9,7 +9,7 @@
 
 [bench]
 backend  = rocksdb,tidesdb
-threads  = 1,8,16
+threads  = 1,8,16,32,64,128
 # Seed every cell with this many threads regardless of its run thread count, so
 # the low thread cells do not seed single threaded. Helps on an SSD, where
 # parallel writes are faster, and shortens the grid since seeding is most of the
@@ -21,7 +21,7 @@ seed_threads = 16
 # against a store the earlier ones churned, a steady state rather than a fresh
 # dataset per cell. Set it to 0 if you want a clean fresh dataset per cell.
 seed_once = 1
-repeat   = 1
+repeat   = 3
 secs     = 60
 # About 2gb
 items    = 500000
@@ -31,7 +31,7 @@ report_dir = ./results
 # python3 with matplotlib, and is best effort, a missing one just prints a note.
 auto_plot = 1
 timeline = 1
-data_dir = /media/agpmastersystem/c794105c-0cd9-4be9-8369-ee6d6e707d68/home/bench/keybench
+data_dir = /media/agpmastersystem/c794105c-0cd9-4be9-8369-ee6d6e707d68/home/keybench
 workload = workloads/mixed.lua
 workload = workloads/cart.lua
 workload = workloads/scan.lua
@@ -50,17 +50,26 @@ compression = kNoCompression
 block_based_table_factory = {block_cache=64M;cache_index_and_filter_blocks=true;filter_policy=bloomfilter:10:false}
 write_buffer_size = 64M
 max_background_jobs = 8
-level0_slowdown_writes_trigger = 5
-level0_file_num_compaction_trigger = 4
-level0_stop_writes_trigger = 10
+# Left at RocksDB's own defaults (20 and 36) on purpose. Setting them to 5 and 10,
+# as this file used to, drives RocksDB into its write stalls -- put p99 went to
+# 2.18 ms with a 3.32 s max and throughput fell to about a quarter -- so the run
+# stops measuring the engine and starts measuring the handicap. Do not re-add these
+# and call the result parity.
+# level0_slowdown_writes_trigger = 5
+# level0_file_num_compaction_trigger = 4
+# level0_stop_writes_trigger = 10
 
-# Reference, RocksDB column family and write path defaults.
+# Reference, RocksDB column family and write path defaults, read from the
+# installed RocksDB 11.8.1 with GetStringFromColumnFamilyOptions.
 # write_buffer_size = 64M                  # memtable size before it flushes
 # max_write_buffer_number = 2              # memtables allowed before writes stall
 # min_write_buffer_number_to_merge = 1     # memtables merged on a flush
-# compression = kSnappyCompression         # default codec when snappy is present
+# compression = kLZ4Compression            # default codec, LZ4 not snappy since v10
+# bottommost_compression = kDisableCompressionOption   # unset means follow compression
 # num_levels = 7                           # number of LSM levels
 # compaction_style = kCompactionStyleLevel
+# compaction_pri = kMinOverlappingRatio    # which files a level picks to compact
+# level_compaction_dynamic_level_bytes = true  # level targets sized from the last level up
 # level0_file_num_compaction_trigger = 4   # L0 files before L0 to L1 compaction
 # level0_slowdown_writes_trigger = 20      # L0 files before writes are slowed
 # level0_stop_writes_trigger = 36          # L0 files before writes are stopped
@@ -69,19 +78,38 @@ level0_stop_writes_trigger = 10
 # target_file_size_base = 64M              # target sstable size at L1
 # target_file_size_multiplier = 1          # sstable size growth per level
 # max_background_jobs = 2                   # flush and compaction worker budget
+# max_subcompactions = 1                    # threads one compaction may split across
 # max_open_files = -1                       # unlimited open files
+# compaction_readahead_size = 2M            # readahead a compaction reads with
+# allow_concurrent_memtable_write = true    # parallel memtable inserts
+# enable_pipelined_write = false            # separate WAL and memtable write stages
+# bytes_per_sync = 0                        # 0 leaves sstable writeback to the OS
+# wal_bytes_per_sync = 0                    # 0 leaves WAL writeback to the OS
+# db_write_buffer_size = 0                  # 0 means no cross column family memtable budget
+# max_total_wal_size = 0                    # 0 lets RocksDB derive the WAL ceiling
+# stats_dump_period_sec = 600               # how often the LOG gets a stats dump
 # info_log_level = INFO_LEVEL              # LOG verbosity, written to the db dir not the console, raise to ERROR_LEVEL to quieten
 
-# Reference, RocksDB block table and block cache defaults. All of these go
-# inside one block_based_table_factory value separated by semicolons, for
-# example block_based_table_factory = {block_cache=32M;block_size=4K}.
+# Reference, RocksDB block table and block cache defaults, read from the
+# installed RocksDB 11.8.1 with the block based table factory's own option
+# string. All of these go inside one block_based_table_factory value separated
+# by semicolons, for example
+# block_based_table_factory = {block_cache=32M;block_size=4K}.
 # block_cache = 32M                        # internal LRU cache built when unset
 # no_block_cache = false                   # true disables the block cache
 # block_size = 4K                          # uncompressed bytes per data block
 # metadata_block_size = 4K                 # bytes per index and filter block
+# block_restart_interval = 16              # keys between restart points in a data block
+# format_version = 7                       # sstable format written
+# checksum = kXXH3                         # per block checksum
+# index_type = kBinarySearch               # index format for a data block lookup
+# whole_key_filtering = true               # filter covers whole keys, not just prefixes
+# optimize_filters_for_memory = true       # size filters to whole memory pages
+# prepopulate_block_cache = kDisable       # kFlushOnly warms the cache on flush
 # cache_index_and_filter_blocks = false    # true keeps index and filter in the cache
 # pin_l0_filter_and_index_blocks_in_cache = false
-# RocksDB attaches no bloom filter by default. The active factory line adds one.
+# filter_policy = nullptr                  # RocksDB attaches no bloom filter by
+#                                          # default. The active factory line adds one.
 
 # Reference, RocksDB BlobDB defaults. These separate large values into blob
 # files to keep the LSM small. Each is its own line, no semicolons needed.
@@ -99,6 +127,10 @@ level0_stop_writes_trigger = 10
 # keybench applies these to the tidesdb config and to its one column family. The
 # lists below are the complete set keybench understands. keybench defaults the
 # log level to none, set log_level below to turn tidesdb logging on.
+#
+# Written for tidesdb 10. The memtable, its WAL sync, and the L0 stall threshold
+# became database level in 10, having been per column family in 9. keybench takes
+# either spelling for those, so the 9 era names below still work.
 [tidesdb]
 # Active overrides for this parity run. Compression off, bloom on, a 64M block
 # cache, and a deeper compaction pool so the comparison with rocksdb is fair.
@@ -107,46 +139,60 @@ enable_bloom_filter = 1
 bloom_fpr = 0.01
 write_buffer_size = 64M
 block_cache_size = 64M
-num_flush_threads = 0
+num_flush_threads = 4
 num_compaction_threads = 4
-# 10 is max, graduated
 l0_queue_stall_threshold = 10
 l1_file_count_trigger = 4
 max_open_sstables = 0
 sync_mode = none
 log_level = none
+# Stated rather than relied on. tidesdb 10.0.0 already defaults to read_committed,
+# so this line changes nothing today, but it is the setting the parity argument
+# rests on and it should not move silently with a release. Snapshot isolation
+# validates every write against the version the transaction read and fails the
+# loser of a race, while a rocksdb put is a blind write with no such check, so
+# under snapshot tidesdb would do strictly more work for the same call. Raise it
+# to snapshot when the point of the run is to measure what that guarantee costs,
+# not to compare like for like.
+isolation = read_committed
 
-# Reference, tidesdb database defaults.
-# num_flush_threads = 0                     # 0 resolves to one per cpu at open
+# Reference, tidesdb 10 database defaults, read from the installed tidesdb
+# 10.0.0 with tidesdb_default_config().
+# num_flush_threads = 2                     # flush worker pool size
 # num_compaction_threads = 2                # compaction worker pool size
-# block_cache_size = 64M                    # clock cache for hot sstable blocks
-#max_open_sstables = 0                       # ceiling on open sstable handles, 0 is unlimited
-# max_memory_usage = 0                      # 0 leaves total memory unbounded
-# max_concurrent_flushes = 0                # 0 matches num_flush_threads
-# unified_memtable = 0                      # 1 shares one memtable across families
-# unified_memtable_write_buffer_size = 0    # 0 sizes it automatically
-# log_level = none                          # none debug info warn error fatal, default none
+# block_cache_size = 64M                    # shared block cache for sstable blocks
+# max_open_sstables = 1024                  # ceiling on open sstable handles, 0 is unlimited
+# write_buffer_size = 64M                   # memtable rotation threshold (memtable_write_buffer_size)
+# sync_mode = none                          # none full or interval (memtable_sync_mode)
+# sync_interval_us = 1000000                # microseconds between syncs in interval mode
+# skip_list_max_level = 12                  # height of the memtable skip list
+# skip_list_probability = 0.25              # level rise probability per node
+# l0_queue_stall_threshold = 16             # queued L0 flushes before writers are paced
+# vlog_segment_size = 256M                  # size at which the value log seals a segment
+# memtable_idle_flush_seconds = 30          # idle seconds before the memtable rotates on its own, 0 never
+# txn_timeout_seconds = 0                   # 0 means an active transaction never expires
+# log_to_file = 0                           # 1 writes tidesdb.log inside the db dir instead of stderr
+# log_truncation_at = 0                     # log bytes before truncate and reopen, 0 never
+# log_level = info                          # none trace info warn error. tidesdb's own default is
+#                                           # info; keybench sets none before applying this section,
+#                                           # so logging stays off unless this line is uncommented.
 
-# Reference, tidesdb column family defaults.
-# write_buffer_size = 64M                   # memtable rotation threshold
+# Reference, tidesdb 10 column family defaults, read from the installed tidesdb
+# 10.0.0 with tidesdb_default_column_family_config().
 # level_size_ratio = 10                     # each level this many times the last
 # min_levels = 1                            # levels created up front
 # dividing_level_offset = 1                 # boundary between tiering and leveling
-# klog_value_threshold = 512                # values this large move to the key log
-# compression = lz4                         # best codec the build has, none if any
-# enable_bloom_filter = 1                   # bloom filter on every sstable
+# klog_value_threshold = 1024               # values this size or larger move to the value log
+# btree_klog_block_size = 4K                # key log btree node size
+# compression = none                        # none snappy lz4 zstd lz4_fast, a one stage encoding pipeline
+# enable_bloom_filter = 1                   # partition range filter on every sstable
 # bloom_fpr = 0.01                          # target false positive rate
-# enable_block_indexes = 1                  # per block sparse index inside sstables
-# index_sample_ratio = 1                    # fraction of blocks the index samples
-# block_index_prefix_len = 16               # bytes of key prefix the index keeps
-# sync_mode = none                          # none full or interval
-# sync_interval_us = 128000                 # microseconds between syncs in interval mode
-# skip_list_max_level = 12                  # height of the memtable skip list
-# skip_list_probability = 0.25              # level rise probability per node
 # isolation = read_committed                # read_uncommitted read_committed repeatable_read snapshot serializable
-# min_disk_space = 100M                     # free space floor before refusing writes
 # l1_file_count_trigger = 4                 # L1 files before compaction into L1
-# l0_queue_stall_threshold = 10             # queued L0 flushes before writes stall
-# tombstone_density_trigger = 0             # 0 disables density driven compaction
-# tombstone_density_min_entries = 1024      # smallest sstable the density check looks at
-# use_btree = 0                             # 1 uses a btree for the key log
+# tombstone_density_trigger = 0.5           # tombstone ratio that triggers a density compaction, 0 disables
+# tombstone_density_min_entries = 4096      # smallest sstable the density check looks at
+#
+# Gone in tidesdb 10 and ignored if set: max_memory_usage, max_concurrent_flushes,
+# unified_memtable, unified_memtable_write_buffer_size (one shared memtable is now
+# the only mode), enable_block_indexes, index_sample_ratio, block_index_prefix_len,
+# min_disk_space, and use_btree (the key log btree is the only format).

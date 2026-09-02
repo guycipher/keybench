@@ -27,6 +27,8 @@ typedef struct
     int n_ops;
     int has_hit;
     double hit_rate;
+    int has_err;
+    double err_rate;
     double wu_med, wu_lo, wu_hi;
     double ops_med, ops_lo, ops_hi;
     uint64_t overall_p50, overall_p99;

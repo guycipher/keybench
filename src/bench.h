@@ -24,6 +24,11 @@ static inline int kv_keycmp(const char *a, size_t alen, const char *b, size_t bl
    it, whichever way its engine signals a stall. */
 #define KV_RETRY (-2)
 
+/* A get returns 1 when the key is found, 0 when it is genuinely absent, and this
+   when the engine failed the lookup. Keeping the two apart stops a failing engine
+   from reporting as a store full of missing keys. */
+#define KV_ERR (-1)
+
 typedef int (*kv_range_cb)(void *arg, const char *k, size_t klen, const char *v, size_t vlen);
 
 typedef void (*kv_stat_cb)(void *arg, const char *name, double value);

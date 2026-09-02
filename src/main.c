@@ -895,6 +895,23 @@ static summary_row summarize_point(const char *name, point_result *Rs, int nr, i
         rp.hit_rate = median_d(tmp, nr);
     }
 
+    for (int r = 0; r < nr; r++)
+        if (Rs[r].stats.get_errors > 0)
+        {
+            rp.has_err = 1;
+            break;
+        }
+    if (rp.has_err)
+    {
+        for (int r = 0; r < nr; r++)
+        {
+            double tot =
+                (double)(Rs[r].stats.get_hits + Rs[r].stats.get_misses + Rs[r].stats.get_errors);
+            tmp[r] = tot > 0 ? 100.0 * Rs[r].stats.get_errors / tot : 0.0;
+        }
+        rp.err_rate = median_d(tmp, nr);
+    }
+
     for (int r = 0; r < nr; r++) tmp[r] = Rs[r].wall > 0 ? Rs[r].units / Rs[r].wall : 0.0;
     rp.wu_med = median_d(tmp, nr);
     rp.wu_lo = tmp[0];
