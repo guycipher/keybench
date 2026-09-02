@@ -21,6 +21,7 @@ set -e  # Exit on error
 # Parse command line arguments
 USE_MIMALLOC=false
 USE_TCMALLOC=false
+USE_JEMALLOC=false
 USE_SANITIZER=false
 PREFIX=""
 REF=""
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --with-tcmalloc)
             USE_TCMALLOC=true
+            shift
+            ;;
+        --with-jemalloc)
+            USE_JEMALLOC=true
             shift
             ;;
         --with-sanitizer)
@@ -54,6 +59,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --with-mimalloc    Build with mimalloc memory allocator"
             echo "  --with-tcmalloc    Build with tcmalloc memory allocator (Google perftools)"
+            echo "  --with-jemalloc    Build with jemalloc memory allocator"
             echo "  --with-sanitizer   Build with AddressSanitizer and UBSan"
             echo "  --prefix DIR       Install here instead of /usr/local, so builds coexist"
             echo "  --ref REF          Build this branch, tag, or commit (default: latest tag)"
@@ -72,6 +78,17 @@ done
 # That is what the build hints below are printed against.
 KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Each of these overrides the malloc family process-wide, so linking two is
+# undefined at best. Pick one.
+ALLOC_COUNT=0
+[ "$USE_MIMALLOC" = true ] && ALLOC_COUNT=$((ALLOC_COUNT+1))
+[ "$USE_TCMALLOC" = true ] && ALLOC_COUNT=$((ALLOC_COUNT+1))
+[ "$USE_JEMALLOC" = true ] && ALLOC_COUNT=$((ALLOC_COUNT+1))
+if [ "$ALLOC_COUNT" -gt 1 ]; then
+    echo "error: choose at most one of --with-mimalloc, --with-tcmalloc, --with-jemalloc"
+    exit 1
+fi
+
 INSTALL_PREFIX="${PREFIX:-/usr/local}"
 SYSTEM_INSTALL=false
 case "$INSTALL_PREFIX" in
@@ -86,6 +103,9 @@ if [ "$USE_MIMALLOC" = true ]; then
 fi
 if [ "$USE_TCMALLOC" = true ]; then
     echo "(with tcmalloc support)"
+fi
+if [ "$USE_JEMALLOC" = true ]; then
+    echo "(with jemalloc support)"
 fi
 if [ "$USE_SANITIZER" = true ]; then
     echo "(with AddressSanitizer/UBSan)"
@@ -137,6 +157,16 @@ fi
 if [ "$USE_TCMALLOC" = true ]; then
     DEPENDENCIES+=(libgoogle-perftools-dev)
     echo "Including tcmalloc (google-perftools) in dependencies..."
+fi
+
+# Add jemalloc if requested. Its cmake path goes through pkg_check_modules, as
+# tcmalloc's does, so pkg-config has to be present for either.
+if [ "$USE_JEMALLOC" = true ]; then
+    DEPENDENCIES+=(libjemalloc-dev)
+    echo "Including jemalloc in dependencies..."
+fi
+if [ "$USE_JEMALLOC" = true ] || [ "$USE_TCMALLOC" = true ]; then
+    DEPENDENCIES+=(pkg-config)
 fi
 
 $SUDO apt-get install -y "${DEPENDENCIES[@]}"
@@ -191,6 +221,12 @@ if [ "$USE_TCMALLOC" = true ]; then
     echo "Enabling tcmalloc support..."
 fi
 
+# Add jemalloc option if requested
+if [ "$USE_JEMALLOC" = true ]; then
+    CMAKE_OPTIONS+=(-DTIDESDB_WITH_JEMALLOC=ON)
+    echo "Enabling jemalloc support..."
+fi
+
 # Add sanitizer option if requested
 if [ "$USE_SANITIZER" = true ]; then
     CMAKE_OPTIONS+=(-DTIDESDB_WITH_SANITIZER=ON)
@@ -232,6 +268,11 @@ if [ "$USE_TCMALLOC" = true ]; then
 else
     echo "Built with tcmalloc: NO"
 fi
+if [ "$USE_JEMALLOC" = true ]; then
+    echo "Built with jemalloc: YES"
+else
+    echo "Built with jemalloc: NO"
+fi
 if [ "$USE_SANITIZER" = true ]; then
     echo "Built with sanitizers: YES (ASan + UBSan)"
 else
@@ -261,6 +302,9 @@ if [ "$USE_MIMALLOC" = true ]; then
 fi
 if [ "$USE_TCMALLOC" = true ]; then
     echo "  ldd $INSTALL_PREFIX/lib/libtidesdb.so | grep tcmalloc"
+fi
+if [ "$USE_JEMALLOC" = true ]; then
+    echo "  ldd $INSTALL_PREFIX/lib/libtidesdb.so | grep jemalloc"
 fi
 echo ""
 
