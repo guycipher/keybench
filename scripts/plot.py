@@ -20,6 +20,12 @@ FIG_FORMATS = ("png", "pdf", "svg")
 DEFAULT_FORMAT = "png"
 MAX_DIRS = 64
 MAX_PANELS = 128
+# Ratio between the tallest and shortest bar past which a linear axis stops being
+# readable and the chart switches to log.
+LOG_SPAN_TRIGGER = 20.0
+BAR_LABEL_SIZE = 7
+# Multiplier above the tallest bar on a log axis, leaving room for labels+legend.
+BAR_HEADROOM_LOG = 6.0
 
 POINTS_FILE = "points.tsv"
 TIMELINE_FILE = "timeline.tsv"
@@ -301,12 +307,25 @@ def label_xticks(ax: object, values: list[int]) -> None:
     ax.minorticks_off()
 
 
-def legend_if_any(ax: object) -> None:
+def legend_if_any(ax: object, loc: str = "best") -> None:
     """Add a legend only when the panel drew something labeled, so an empty panel
-    does not warn about having no artists to put in a legend."""
+    does not warn about having no artists to put in a legend. loc lets a caller put
+    it where that panel's data leaves room, since "best" only avoids the lines it
+    knows about and not text a caller annotated on afterwards."""
     handles, _ = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(fontsize=LEGEND_FONTSIZE)
+        ax.legend(fontsize=LEGEND_FONTSIZE, loc=loc)
+
+
+
+def compact_rate(v: float) -> str:
+    """Short bar label: 1.06M, 63.9k, 3333. Full precision is not the point, being
+    able to read the number off a log axis is."""
+    if v >= 1e6:
+        return f"{v / 1e6:.2f}M"
+    if v >= 1e4:
+        return f"{v / 1e3:.1f}k"
+    return f"{v:.0f}"
 
 
 def plot_throughput_compare(points: list[Point], palette: dict[str, str],
@@ -322,16 +341,50 @@ def plot_throughput_compare(points: list[Point], palette: dict[str, str],
         return None
     fig, ax = plt.subplots(figsize=(max(PANEL_W, 1.5 * len(workloads)), PANEL_H))
     width = 1.0 / (len(engines) + 1)
+    drawn: list[tuple[float, float]] = []
     for idx, engine in enumerate(engines):
         ys = [point_value(usable, w, engine) for w in workloads]
         xs = [j + idx * width for j in range(len(workloads))]
         ax.bar(xs, ys, width=width, color=engine_color(engine, palette), label=engine)
+        drawn.extend((x, y) for x, y in zip(xs, ys) if y is not None)
+
+    # Workloads differ in how much work one unit is, so their rates span orders of
+    # magnitude: a scan unit reads a thousand rows while a valsize unit touches one
+    # small value. On a shared linear axis the slowest workload is drawn a fraction
+    # of a pixel tall and reads as missing data rather than as a small number. Above
+    # a wide enough span switch to a log axis, which keeps every workload legible
+    # and makes the engine gap within each workload the thing the eye compares.
+    values = [y for _, y in drawn if y and y > 0]
+    if values and max(values) / min(values) > LOG_SPAN_TRIGGER:
+        ax.set_yscale("log")
+        ax.set_ylabel("wu per s (log)")
+    else:
+        ax.set_ylabel("wu per s")
+
+    # A bar chart people read numbers off should carry them, since neither scale
+    # lets you recover a value by eye.
+    for x, y in drawn:
+        if y is None:
+            continue
+        ax.annotate(compact_rate(y), (x, y), ha="center", va="bottom",
+                    fontsize=BAR_LABEL_SIZE, rotation=90, xytext=(0, 2),
+                    textcoords="offset points")
+
     ax.set_xticks([j + width * (len(engines) - 1) / 2 for j in range(len(workloads))])
     ax.set_xticklabels(workloads)
-    ax.set_ylabel("wu per s")
     ax.set_title(f"Throughput by workload at {top} threads")
     ax.grid(True, axis="y", alpha=GRID_ALPHA)
-    legend_if_any(ax)
+    # Headroom for the rotated bar labels and the legend, which would otherwise sit
+    # on top of the tallest bar. A log axis needs it as a factor, not a fraction.
+    if values:
+        if ax.get_yscale() == "log":
+            ax.set_ylim(top=max(values) * BAR_HEADROOM_LOG)
+        else:
+            ax.margins(y=0.22)
+    # The bar labels are rotated upward from the top of each bar, so a legend in
+    # the top right sits on the tallest one's label. Put it top left, which the
+    # shorter workloads leave clear.
+    legend_if_any(ax, loc="upper left")
     return save(fig, outdir, "throughput_compare", ext)
 
 

@@ -148,9 +148,9 @@ static void sys_info(probe_info_cb cb, void *arg)
         char b[32];
         snprintf(b, sizeof b, "%ld", cores);
         cb(arg, "cpu_cores", b);
-    /* Recorded whether pinning is on or off, since a result read months later
-       needs to know which placement produced it. */
-    cb(arg, "cpu_affinity", kb_affinity_desc());
+        /* Recorded whether pinning is on or off, since a result read months later
+           needs to know which placement produced it. */
+        cb(arg, "cpu_affinity", kb_affinity_desc());
     }
 
     long psz = sysconf(_SC_PAGE_SIZE), pages = sysconf(_SC_PHYS_PAGES);

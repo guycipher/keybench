@@ -10,8 +10,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "backend_registry.h"
 #include "affinity.h"
+#include "backend_registry.h"
 #include "bench.h"
 #include "config.h"
 #include "hist.h"
@@ -1635,8 +1635,9 @@ int main(int argc, char **argv)
        worth having when a run was confined by taskset or a cpuset without anyone
        recording it. */
     if (kb_affinity_init(cfg.pin) == 0 && cfg.pin)
-        fprintf(stderr, "keybench: warning, --pin requested but cpu affinity is unavailable here, "
-                        "running unpinned\n");
+        fprintf(stderr,
+                "keybench: warning, --pin requested but cpu affinity is unavailable here, "
+                "running unpinned\n");
 
     probe_set_data_dir(cfg.data_dir);
     emit_probes(&reporters);

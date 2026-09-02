@@ -75,8 +75,8 @@ int kb_affinity_init(int enable)
     char set[96];
     kb_format_set(set, sizeof set);
     if (kb_enabled)
-        snprintf(kb_desc, sizeof kb_desc, "on (%d cpu%s: %s)", kb_ncpus,
-                 kb_ncpus == 1 ? "" : "s", set);
+        snprintf(kb_desc, sizeof kb_desc, "on (%d cpu%s: %s)", kb_ncpus, kb_ncpus == 1 ? "" : "s",
+                 set);
     else
         snprintf(kb_desc, sizeof kb_desc, "off (%d cpu%s available: %s)", kb_ncpus,
                  kb_ncpus == 1 ? "" : "s", set);
